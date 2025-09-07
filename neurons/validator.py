@@ -123,13 +123,22 @@ class EmissionManager:
         self.save_state()
         logger.info(f"First challenge completed, winner: {winner_hotkey[:12]}...")
     
-    def update_winner(self, winner_hotkey: str):
-        """Update current winner and start reward period"""
+    def update_winner(self, winner_hotkey: str, challenge_active: bool = True):
+        """Update current winner and start appropriate reward period"""
         self.current_winner = winner_hotkey
-        self.winner_reward_start_time = datetime.now(timezone.utc)
-        self.current_phase = "winner_reward"
+        
+        if challenge_active:
+            # During active challenge - no time limit, reward until better submission
+            self.winner_reward_start_time = None  # No time limit during challenge
+            self.current_phase = "normal"  # Use normal logic during challenge
+            logger.info(f"New winner during active challenge: {winner_hotkey[:12]}... (no time limit)")
+        else:
+            # Challenge expired - start timed reward period
+            self.winner_reward_start_time = datetime.now(timezone.utc)
+            self.current_phase = "winner_reward"
+            logger.info(f"New winner after challenge expiry: {winner_hotkey[:12]}... (timed reward period)")
+        
         self.save_state()
-        logger.info(f"New winner: {winner_hotkey[:12]}...")
     
     def mark_challenge_ended(self):
         """Mark that current challenge has ended"""
@@ -321,15 +330,14 @@ class ValidatorState:
     def __init__(self, state_file: str = "validator_state.json"):
         self.state_file = state_file
         self.current_batch_id: Optional[str] = None
-        # self.last_weights: Dict[str, float] = {}
         self.evaluation_in_progress: bool = False
         self.last_challenge_id: Optional[str] = None
         self.evaluated_batches: set = set()
         self.challenge_best_miners: Dict[str, Tuple[str, float]] = {}  # challenge_id -> (hotkey, score)
-        # self.overall_best_miner: Tuple[Optional[str], float] = (None, 0.0)
         self.active_challenges: Dict[str, Dict] = {}  # challenge_id -> challenge_info
         self.expired_challenges: List[str] = []
         self.current_challenge_best: Tuple[Optional[str], float] = (None, 0.0)  # Current challenge only
+        self.current_challenge_expires_at: Optional[datetime] = None
         
         self.load_state()
     
@@ -340,19 +348,16 @@ class ValidatorState:
                 with open(self.state_file, 'r') as f:
                     data = json.load(f)
                     self.current_batch_id = data.get('current_batch_id')
-                    # self.last_weights = data.get('last_weights', {})
                     self.evaluation_in_progress = data.get('evaluation_in_progress', False)
                     self.last_challenge_id = data.get('last_challenge_id')
                     self.evaluated_batches = set(data.get('evaluated_batches', []))
                     self.challenge_best_miners = data.get('challenge_best_miners', {})
-                    
-                    # overall_best = data.get('overall_best_miner', [None, 0.0])
-                    # self.overall_best_miner = (overall_best[0], overall_best[1])
 
                     current_challenge_best = data.get('current_challenge_best', [None, 0.0])
                     self.current_challenge_best = (current_challenge_best[0], current_challenge_best[1])
+
+                    self.current_challenge_expires_at = data.get('current_challenge_expires_at', None)
                     
-                    # logger.info(f"Loaded validator state: {len(self.last_weights)} last weights")
         except Exception as e:
             logger.error(f"Error loading validator state: {e}")
     
@@ -372,6 +377,7 @@ class ValidatorState:
                 'expired_challenges': self.expired_challenges,
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 'current_challenge_best': list(self.current_challenge_best),
+                'current_challenge_expires_at': self.current_challenge_expires_at,
             }
             with open(self.state_file, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -783,8 +789,8 @@ class ChipForgeValidator:
             now = datetime.now(timezone.utc)
             
             # Check if it's time for next batch check
-            if now < self.next_batch_check:
-                return
+            # if now < self.next_batch_check:
+            #     return
             
             # Sync metagraph to see current miners
             self.metagraph.sync(subtensor=self.subtensor)
@@ -801,9 +807,17 @@ class ChipForgeValidator:
                     winner_hotkey = self.state.current_challenge_best[0]
                     logger.info(f"Starting winner reward period for {winner_hotkey[:12]}... from expired challenge {self.state.last_challenge_id}")
                     
-                    # Update emission manager to start winner reward period
-                    self.emission_manager.update_winner(winner_hotkey)
-                    self.emission_manager.mark_challenge_ended()
+                    # Use current time as effective expiration time (handles manual completion)
+                    effective_expiration_time = datetime.now(timezone.utc)
+                    
+                    # Update emission manager to start winner reward period from effective expiration
+                    self.emission_manager.current_winner = winner_hotkey
+                    self.emission_manager.winner_reward_start_time = effective_expiration_time
+                    self.emission_manager.last_challenge_end_time = effective_expiration_time
+                    self.emission_manager.current_phase = "winner_reward"  # Now it's a timed period
+                    self.emission_manager.save_state()
+                    
+                    logger.info(f"Winner reward period started at {effective_expiration_time} for {self.emission_manager.total_hours_for_winner_reward}h")
                 else:
                     logger.info(f"Challenge {self.state.last_challenge_id} expired but no winner found")
                     self.emission_manager.mark_challenge_ended()
@@ -853,6 +867,12 @@ class ChipForgeValidator:
             if self.state.last_challenge_id != challenge_id:
                 await self.notify_miners_challenge_active(challenge_id, challenge['github_url'])
 
+                # Store challenge expiration time for winner reward calculations
+                if 'expires_at' in challenge:
+                    challenge_expires_at = datetime.fromisoformat(challenge['expires_at'].replace('Z', '+00:00'))
+                    self.state.current_challenge_expires_at = challenge_expires_at
+                    logger.info(f"Challenge {challenge_id} expires at: {challenge_expires_at}")
+
                 # Reset current challenge best for new challenge
                 logger.info(f"New challenge {challenge_id} started - resetting current challenge best score")
                 self.state.current_challenge_best = (None, 0.0)
@@ -899,7 +919,7 @@ class ChipForgeValidator:
             
             # Check if we've already processed this batch
             if batch_id in self.state.evaluated_batches:
-                logger.debug(f"Batch {batch_id} already processed")
+                logger.info(f"Batch {batch_id} already processed")
                 return
             
             # Process the batch
@@ -1186,7 +1206,7 @@ class ChipForgeValidator:
                 self.state.current_challenge_best = (new_champion, new_best_score)
                 
                 # Update emission manager with new winner
-                self.emission_manager.update_winner(new_champion)
+                self.emission_manager.update_winner(new_champion, challenge_active=True)
                 
                 # Check if new champion is on subnet and get UID
                 try:
