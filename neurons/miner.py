@@ -4,6 +4,8 @@ ChipForge Subnet Miner (Updated for Built-in Synapse Fields)
 Receives challenge notifications and manages challenge downloads
 """
 
+import bittensor as bt
+from chipforge.protocol import SimpleMessage
 import os
 import asyncio
 import zipfile
@@ -15,8 +17,7 @@ import traceback
 import json
 import argparse
 from typing import Dict, Optional, Tuple
-import bittensor as bt
-from chipforge.protocol import SimpleMessage
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 # Global registration - try multiple approaches
@@ -63,66 +64,81 @@ class ChipForgeMiner:
         self.setup_axon_handlers()
 
     def setup_axon_handlers(self):
-        """Setup axon handlers for built-in Synapse fields"""
+        """Setup axon handlers with function-based registration"""
         
+        # Register handler for SimpleMessage synapse specifically
         self.axon.attach(
-            forward_fn=self.forward_synapse,
-            blacklist_fn=self.blacklist_synapse,
-            priority_fn=self.priority_synapse
+            forward_fn=self.handle_simple_message,
+            blacklist_fn=self.blacklist_simple_message,
+            priority_fn=self.priority_simple_message
         )
         
-        logger.info("Axon handlers registered for built-in Synapse fields")
+        logger.info("Axon handlers registered for SimpleMessage")
 
-    async def forward_synapse(self, synapse: bt.Synapse) -> bt.Synapse:
-        """Handle incoming synapses"""
+    async def handle_simple_message(self, synapse: SimpleMessage) -> SimpleMessage:
+        """Handle SimpleMessage synapse - function signature is critical"""
         try:
-            logger.info(f"RECEIVED SYNAPSE: {type(synapse).__name__}")
+            logger.info(f"RECEIVED SimpleMessage: {synapse.message}")
             
-            if isinstance(synapse, SimpleMessage):
-                logger.info(f"Processing SimpleMessage: {synapse.message}")
-                
-                message = synapse.message
-                if 'CHALLENGE_ACTIVE:' in message:
-                    return await self.handle_challenge_message(synapse, message)
-                elif 'BATCH_COMPLETE:' in message:
-                    return await self.handle_batch_message(synapse, message)
+            message = synapse.message
+            if 'CHALLENGE_ACTIVE:' in message:
+                return await self.handle_challenge_message(synapse, message)
+            elif 'BATCH_COMPLETE:' in message:
+                return await self.handle_batch_message(synapse, message)
             
+            synapse.response = "OK"
             return synapse
             
         except Exception as e:
-            logger.error(f"Error in forward_synapse: {e}")
+            logger.error(f"Error handling SimpleMessage: {e}")
+            synapse.response = f"ERROR: {str(e)}"
             return synapse
 
+    async def blacklist_simple_message(self, synapse: SimpleMessage) -> Tuple[bool, str]:
+        """Blacklist function for SimpleMessage"""
+        return False, ""
+
+    async def priority_simple_message(self, synapse: SimpleMessage) -> float:
+        """Priority function for SimpleMessage"""
+        return 1000.0
+
     async def handle_challenge_message(self, synapse: SimpleMessage, message: str) -> SimpleMessage:
-        """Handle challenge message"""
+        """Handle challenge notification message - simplified to just acknowledge"""
         try:
+            # Parse message: "CHALLENGE_ACTIVE:{challenge_id}:{github_url}:{timestamp}"
             parts = message.split(':')
+            
             if len(parts) >= 4 and parts[0] == "CHALLENGE_ACTIVE":
                 challenge_id = parts[1]
-                github_url = parts[2]
+                github_url = parts[2] 
+                timestamp = parts[3]
                 
-                logger.info(f"RECEIVED CHALLENGE: {challenge_id}")
+                logger.info(f"RECEIVED CHALLENGE NOTIFICATION: {challenge_id}")
+                logger.info(f"GitHub URL from validator: {github_url}")
+                logger.info(f"Timestamp: {timestamp}")
                 
+                # Just update current challenge info - don't download here
                 self.current_challenge_id = challenge_id
-                self.current_github_url = github_url
+                # Note: We'll get the correct URL from poll_for_challenges
                 
-                if github_url:
-                    success = await self.download_challenge(challenge_id, github_url)
-                    synapse.response = "OK" if success else "DOWNLOAD_FAILED"
-                else:
-                    synapse.response = "OK"
+                # Always respond OK since we'll handle download in poll_for_challenges
+                synapse.response = "OK"
+                logger.info(f"Acknowledged challenge notification for {challenge_id}")
+                
             else:
+                logger.warning(f"Invalid challenge message format: {message}")
                 synapse.response = "INVALID_FORMAT"
             
             return synapse
             
         except Exception as e:
-            logger.error(f"Error handling challenge: {e}")
+            logger.error(f"Error handling challenge message: {e}")
+            logger.error(traceback.format_exc())
             synapse.response = f"ERROR: {str(e)}"
             return synapse
     
     async def handle_batch_message(self, synapse: SimpleMessage, message: str) -> SimpleMessage:
-        """Handle batch completion message"""
+        """Handle batch completion message - just acknowledge"""
         try:
             # Parse message: "BATCH_COMPLETE:{batch_id}:{timestamp}"
             parts = message.split(':')
@@ -131,12 +147,12 @@ class ChipForgeMiner:
                 batch_id = parts[1]
                 timestamp = parts[2]
                 
-                logger.info(f"RECEIVED BATCH COMPLETE: {batch_id}")
+                logger.info(f"RECEIVED BATCH COMPLETION NOTIFICATION: {batch_id}")
                 logger.info(f"Timestamp: {timestamp}")
                 
-                # Set response
+                # Just acknowledge - no action needed
                 synapse.response = "OK"
-                logger.info(f"Acknowledged batch completion")
+                logger.info(f"Acknowledged batch completion for {batch_id}")
                 
             else:
                 logger.warning(f"Invalid batch message format: {message}")

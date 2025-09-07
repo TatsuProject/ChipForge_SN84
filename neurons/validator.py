@@ -3,6 +3,8 @@
 ChipForge Subnet Validator (Refactored)
 Main validator entry point with modular architecture
 """
+import bittensor as bt
+from chipforge.protocol import SimpleMessage
 
 import asyncio
 import aiohttp
@@ -16,26 +18,6 @@ import traceback
 import argparse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
-import bittensor as bt
-from chipforge.protocol import SimpleMessage
-
-# Global registration - try multiple approaches
-try:
-    # Method 1: Global synapse registry
-    if hasattr(bt, '_synapse_registry'):
-        bt._synapse_registry['SimpleMessage'] = SimpleMessage
-    
-    # Method 2: Add to Synapse class
-    if hasattr(bt.Synapse, '_synapses'):
-        bt.Synapse._synapses['SimpleMessage'] = SimpleMessage
-    
-    # Method 3: Module-level globals
-    globals()['SimpleMessage'] = SimpleMessage
-    
-    logger.info("SimpleMessage registered globally")
-except Exception as e:
-    logger.error(f"Failed to register SimpleMessage: {e}")
 
 # Import validator utilities
 from validator_utils import (
@@ -79,17 +61,6 @@ class ChipForgeValidator:
         # Batch timing
         self.next_batch_check = datetime.now(timezone.utc)
         self.consecutive_errors = 0
-
-        try:
-            if hasattr(bt.Synapse, 'register'):
-                bt.Synapse.register(ChallengeNotification)
-                bt.Synapse.register(BatchEvaluationComplete)
-                logger.info("Custom synapses registered in validator")
-            else:
-                logger.warning("Synapse registration method not found in validator")
-                
-        except Exception as e:
-            logger.error(f"Failed to register custom synapses in validator: {e}")
         
         logger.info(f"ChipForge Validator initialized")
         logger.info(f"Validator hotkey: {self.wallet.hotkey.ss58_address}")

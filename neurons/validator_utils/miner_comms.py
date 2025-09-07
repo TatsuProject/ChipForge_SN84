@@ -4,30 +4,13 @@ Miner Communications for ChipForge Validator (Simplified)
 Handles communication with miners via Bittensor protocol using default Synapse
 """
 
+import bittensor as bt
+from chipforge.protocol import SimpleMessage
+
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List
 logger = logging.getLogger(__name__)
-import bittensor as bt
-from chipforge.protocol import SimpleMessage
-
-# Global registration - try multiple approaches
-try:
-    # Method 1: Global synapse registry
-    if hasattr(bt, '_synapse_registry'):
-        bt._synapse_registry['SimpleMessage'] = SimpleMessage
-    
-    # Method 2: Add to Synapse class
-    if hasattr(bt.Synapse, '_synapses'):
-        bt.Synapse._synapses['SimpleMessage'] = SimpleMessage
-    
-    # Method 3: Module-level globals
-    globals()['SimpleMessage'] = SimpleMessage
-    
-    logger.info("SimpleMessage registered globally")
-except Exception as e:
-    logger.error(f"Failed to register SimpleMessage: {e}")
-
 
 class MinerCommunications:
     """Handles communication with miners using default Synapse"""
