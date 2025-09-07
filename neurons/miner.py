@@ -46,6 +46,12 @@ class ChipForgeMiner:
         logger.info(f"Challenge directory: {self.challenge_dir.absolute()}")
         
         logger.info(f"Challenge directory: {self.challenge_dir.absolute()}")
+
+        # Register custom synapse classes
+        self.axon.forward_class_types = {
+            'ChallengeNotification': ChallengeNotification,
+            'BatchEvaluationComplete': BatchEvaluationComplete,
+        }
     
         # Register custom synapses with axon
         self.axon.attach(
@@ -54,25 +60,42 @@ class ChipForgeMiner:
             priority_fn=self.priority,
         )
         
-        # Add the synapses to the axon's registry
-        if hasattr(self.axon, 'forward_class_types'):
-            self.axon.forward_class_types[ChallengeNotification.__name__] = ChallengeNotification
-            self.axon.forward_class_types[BatchEvaluationComplete.__name__] = BatchEvaluationComplete
+        # self.axon.attach(
+        #     forward_fn=self.challenge_notification_handler,
+        #     synapse=ChallengeNotification
+        # )
+        
+        # self.axon.attach(
+        #     forward_fn=self.batch_evaluation_complete_handler,
+        #     synapse=BatchEvaluationComplete
+        # )
 
     async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
-        """Generic forward handler that routes to specific handlers"""
-        if isinstance(synapse, ChallengeNotification):
-            return await self.challenge_notification_handler(synapse)
-        elif isinstance(synapse, BatchEvaluationComplete):
-            return await self.batch_evaluation_complete_handler(synapse)
-        else:
-            logger.warning(f"Unknown synapse type: {type(synapse)}")
+        """Route synapses to appropriate handlers"""
+        try:
+            logger.info(f"🔥 SYNAPSE RECEIVED: {type(synapse).__name__}")
+            logger.info(f"Synapse attributes: {[attr for attr in dir(synapse) if not attr.startswith('_')]}")
+            
+            if isinstance(synapse, ChallengeNotification):
+                logger.info("Routing to challenge notification handler")
+                return await self.challenge_notification_handler(synapse)
+            elif isinstance(synapse, BatchEvaluationComplete):
+                logger.info("Routing to batch evaluation handler")
+                return await self.batch_evaluation_complete_handler(synapse)
+            else:
+                logger.warning(f"Unknown synapse type: {type(synapse)}")
+                synapse.response = "UNKNOWN_SYNAPSE_TYPE"
+                return synapse
+        except Exception as e:
+            logger.error(f"Error in forward routing: {e}")
+            logger.error(traceback.format_exc())
+            synapse.response = f"ERROR: {str(e)}"
             return synapse
-    
+
     async def challenge_notification_handler(self, synapse: ChallengeNotification) -> ChallengeNotification:
         """Handle challenge notification from validator"""
         try:
-            logger.info(f"Received challenge notification: {synapse.challenge_id}")
+            logger.info(f"🔥 RECEIVED SYNAPSE: {synapse.challenge_id}")
             logger.info(f"GitHub URL: {synapse.github_url}")
             logger.info(f"Message: {synapse.message}")
             
@@ -84,16 +107,18 @@ class ChipForgeMiner:
             if synapse.github_url:
                 success = await self.download_challenge(synapse.challenge_id, synapse.github_url)
                 if success:
-                    logger.info(f"Successfully downloaded challenge {synapse.challenge_id}")
+                    logger.info(f"✅ Successfully downloaded challenge {synapse.challenge_id}")
+                    synapse.response = "OK"
                 else:
-                    logger.error(f"Failed to download challenge {synapse.challenge_id}")
+                    logger.error(f"❌ Failed to download challenge {synapse.challenge_id}")
+                    synapse.response = "DOWNLOAD_FAILED"
+            else:
+                synapse.response = "OK"
             
-            # Send acknowledgment
-            synapse.response = "OK"
             return synapse
             
         except Exception as e:
-            logger.error(f"Error handling challenge notification: {e}")
+            logger.error(f"💥 Error handling challenge notification: {e}")
             logger.error(traceback.format_exc())
             synapse.response = f"ERROR: {str(e)}"
             return synapse
@@ -101,23 +126,30 @@ class ChipForgeMiner:
     async def batch_evaluation_complete_handler(self, synapse: BatchEvaluationComplete) -> BatchEvaluationComplete:
         """Handle batch evaluation complete notification from validator"""
         try:
-            logger.info(f"Received batch evaluation complete notification")
+            logger.info(f"🔥 RECEIVED BATCH COMPLETE SYNAPSE")
             logger.info(f"Message: {synapse.message}")
             if synapse.batch_id:
                 logger.info(f"Batch ID: {synapse.batch_id}")
             
-            # Log the completion (miners don't need to take action)
-            logger.info("Batch evaluation completed by validator")
-            
-            # Send acknowledgment
+            # Send immediate acknowledgment
             synapse.response = "OK"
+            logger.info(f"✅ Acknowledged batch completion")
             return synapse
             
         except Exception as e:
-            logger.error(f"Error handling batch completion notification: {e}")
+            logger.error(f"💥 Error handling batch completion: {e}")
             logger.error(traceback.format_exc())
             synapse.response = f"ERROR: {str(e)}"
             return synapse
+
+    async def blacklist(self, synapse: bt.Synapse) -> Tuple[bool, str]:
+        """Never blacklist - always accept synapses"""
+        return False, ""
+
+    async def priority(self, synapse: bt.Synapse) -> float:
+        """High priority for all synapses"""
+        return 1000.0  # Always highest priority
+
     
     async def download_challenge(self, challenge_id: str, github_url: str) -> bool:
         """Download challenge from GitHub and extract to challenge directory"""
@@ -212,17 +244,6 @@ class ChipForgeMiner:
             logger.error(f"Error converting GitHub URL: {e}")
             return ""
 
-    async def blacklist(self, synapse: bt.Synapse) -> Tuple[bool, str]:
-        """Generic blacklist function"""
-        return False, ""
-
-    async def priority(self, synapse: bt.Synapse) -> float:
-        """Generic priority function"""
-        if isinstance(synapse, ChallengeNotification):
-            return 1000.0
-        elif isinstance(synapse, BatchEvaluationComplete):
-            return 500.0
-        return 0.0
     
     def get_challenge_files(self) -> Dict[str, Path]:
         """Get paths to current challenge files"""
@@ -355,42 +376,82 @@ class ChipForgeMiner:
                     logger.info(f"  {name}: {path.relative_to(self.challenge_dir)}")
         else:
             logger.info("No challenge files found")
+
+    async def test_axon_reachability(self):
+        """Test if our axon is reachable from outside"""
+        try:
+            import aiohttp
+            test_url = f"http://{self.axon.external_ip}:{self.axon.external_port}"
+            logger.info(f"Testing axon reachability at: {test_url}")
+            
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(f"{test_url}/", timeout=20) as response:
+                        logger.info(f"Axon reachable! Status: {response.status}")
+                except Exception as e:
+                    logger.error(f"Axon NOT reachable: {e}")
+                    logger.error("This explains why validator can't send synapses!")
+                    
+        except Exception as e:
+            logger.error(f"Error testing reachability: {e}")
     
     async def run(self):
-        """Main miner loop"""
+        """Main miner loop with better logging"""
+        logger.info("🚀 Starting ChipForge Miner")
+        
+        # Serve axon
+        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+        self.axon.start()
+
+        """Main miner loop with network debugging"""
         logger.info("Starting ChipForge Miner")
         
         # Serve axon
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
         self.axon.start()
         
-        logger.info(f"Axon serving on {self.axon.external_ip}:{self.axon.external_port}")
+        # Debug network info
+        logger.info(f"Axon external IP: {self.axon.external_ip}")
+        logger.info(f"Axon external port: {self.axon.external_port}")
+        logger.info(f"Axon local IP: {self.axon.ip}")
+        logger.info(f"Axon local port: {self.axon.port}")
+        logger.info(f"Axon is serving: {self.axon.started}")
+        
+        # Test if axon is reachable
+        await self.test_axon_reachability()
+        
+        logger.info(f"🌐 Axon serving on {self.axon.external_ip}:{self.axon.external_port}")
+        logger.info(f"🔑 Miner hotkey: {self.wallet.hotkey.ss58_address}")
+        logger.info(f"📡 Waiting for synapses from validators...")
         
         # Start challenge polling task
         polling_task = asyncio.create_task(self.poll_for_challenges())
         
         try:
-            # Main loop
+            # Main loop with better sync timing
             while True:
                 try:
-                    # Sync metagraph
+                    # Sync metagraph more frequently to see validators
                     self.metagraph.sync(subtensor=self.subtensor)
+                    logger.debug(f"📊 Metagraph synced - {len(self.metagraph.neurons)} neurons")
                     
-                    # Print current status every 5 minutes
-                    await asyncio.sleep(300)
-                    self.print_challenge_info()
+                    # Log serving status
+                    serving_count = sum(1 for axon in self.metagraph.axons if axon.is_serving)
+                    logger.debug(f"🔄 {serving_count} miners serving on subnet")
+                    
+                    await asyncio.sleep(60)  # Sync every minute instead of 5 minutes
                     
                 except KeyboardInterrupt:
-                    logger.info("Received interrupt signal")
+                    logger.info("⏹️ Received interrupt signal")
                     break
                 except Exception as e:
-                    logger.error(f"Error in miner loop: {e}")
+                    logger.error(f"💥 Error in miner loop: {e}")
                     await asyncio.sleep(10)
         
         finally:
             polling_task.cancel()
             self.axon.stop()
-            logger.info("ChipForge Miner stopped")
+            logger.info("⏹️ ChipForge Miner stopped")
 
 
 def get_config():

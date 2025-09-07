@@ -40,17 +40,19 @@ class EmissionManager:
         self.config_file = config_file
         self.load_config()
         
-        # State tracking
+        # State tracking with persistence
         self.subnet_start_time = None
         self.first_challenge_end_time = None
         self.winner_reward_start_time = None
-        self.current_phase = "initial_burn"  # initial_burn, winner_reward, normal, burn_until_submission
+        self.current_phase = "initial_burn"
+        self.current_winner = None  # Add persistence for current winner
+        self.last_challenge_end_time = None  # Track when last challenge ended
         
         self.load_state()
     
     def load_config(self):
         """Load timing configuration from env or defaults"""
-        self.total_hours_for_winner_reward = float(os.getenv('TOTAL_HOURS_FOR_WINNER_REWARD', '48'))  # 2 days
+        self.total_hours_for_winner_reward = float(os.getenv('TOTAL_HOURS_FOR_WINNER_REWARD', '0.1'))
         self.burn_after_winner_days = float(os.getenv('BURN_AFTER_WINNER_DAYS', '0'))
         
         # Convert hours to days for internal consistency
@@ -69,15 +71,20 @@ class EmissionManager:
                     self.first_challenge_end_time = data.get('first_challenge_end_time')
                     self.winner_reward_start_time = data.get('winner_reward_start_time')
                     self.current_phase = data.get('current_phase', 'initial_burn')
+                    self.current_winner = data.get('current_winner')  # Restore winner
+                    self.last_challenge_end_time = data.get('last_challenge_end_time')  # Restore last challenge end
                     
+                    # Convert ISO strings back to datetime objects
                     if self.subnet_start_time:
                         self.subnet_start_time = datetime.fromisoformat(self.subnet_start_time)
                     if self.first_challenge_end_time:
                         self.first_challenge_end_time = datetime.fromisoformat(self.first_challenge_end_time)
                     if self.winner_reward_start_time:
                         self.winner_reward_start_time = datetime.fromisoformat(self.winner_reward_start_time)
+                    if self.last_challenge_end_time:
+                        self.last_challenge_end_time = datetime.fromisoformat(self.last_challenge_end_time)
                         
-                logger.info(f"Loaded emission state: phase={self.current_phase}")
+                logger.info(f"Loaded emission state: phase={self.current_phase}, winner={self.current_winner[:12] + '...' if self.current_winner else 'None'}")
         except Exception as e:
             logger.error(f"Error loading emission state: {e}")
     
@@ -89,6 +96,8 @@ class EmissionManager:
                 'first_challenge_end_time': self.first_challenge_end_time.isoformat() if self.first_challenge_end_time else None,
                 'winner_reward_start_time': self.winner_reward_start_time.isoformat() if self.winner_reward_start_time else None,
                 'current_phase': self.current_phase,
+                'current_winner': self.current_winner,
+                'last_challenge_end_time': self.last_challenge_end_time.isoformat() if self.last_challenge_end_time else None,
                 'updated_at': datetime.now(timezone.utc).isoformat()
             }
             with open('emission_state.json', 'w') as f:
@@ -110,49 +119,158 @@ class EmissionManager:
         self.winner_reward_start_time = datetime.now(timezone.utc)
         self.current_phase = "winner_reward"
         self.current_winner = winner_hotkey
+        self.last_challenge_end_time = datetime.now(timezone.utc)
         self.save_state()
         logger.info(f"First challenge completed, winner: {winner_hotkey[:12]}...")
+    
+    def update_winner(self, winner_hotkey: str):
+        """Update current winner and start reward period"""
+        self.current_winner = winner_hotkey
+        self.winner_reward_start_time = datetime.now(timezone.utc)
+        self.current_phase = "winner_reward"
+        self.save_state()
+        logger.info(f"New winner: {winner_hotkey[:12]}...")
+    
+    def mark_challenge_ended(self):
+        """Mark that current challenge has ended"""
+        self.last_challenge_end_time = datetime.now(timezone.utc)
+        self.save_state()
+        logger.info("Challenge ended, marked in emission state")
+    
+    def recover_emission_state_after_crash(self, current_challenge_active: bool, validator_best_miner: Optional[Tuple[str, float]] = None):
+        """Recover emission state after validator crash/restart"""
+        now = datetime.now(timezone.utc)
+        
+        # Handle case where we have a winner in validator state but not in emission state
+        if not self.current_winner and validator_best_miner and validator_best_miner[0]:
+            logger.info(f"Found winner in validator state but not in emission state: {validator_best_miner[0][:12]}...")
+            
+            # If we have a last challenge end time, use it to determine reward period
+            if self.last_challenge_end_time:
+                time_since_challenge_end = now - self.last_challenge_end_time
+                
+                if time_since_challenge_end < timedelta(hours=self.total_hours_for_winner_reward):
+                    # Start winner reward period from challenge end time
+                    self.current_winner = validator_best_miner[0]
+                    self.winner_reward_start_time = self.last_challenge_end_time
+                    self.current_phase = "winner_reward"
+                    remaining_time = timedelta(hours=self.total_hours_for_winner_reward) - time_since_challenge_end
+                    logger.info(f"Crash recovery: Starting winner reward for {self.current_winner[:12]}... ({remaining_time.total_seconds()/3600:.1f}h remaining)")
+                    self.save_state()
+                    return
+                else:
+                    # Winner reward period would have expired
+                    logger.info(f"Crash recovery: Winner reward period expired ({time_since_challenge_end.total_seconds()/3600:.1f}h since challenge end)")
+                    self.current_phase = "burn_until_submission"
+                    self.save_state()
+                    return
+            else:
+                # No challenge end time, assume winner period expired
+                logger.info("Crash recovery: No challenge end time, assuming winner period expired")
+                self.current_phase = "burn_until_submission"
+                self.save_state()
+                return
+        
+        # If we have a winner and reward period info
+        if self.current_winner and self.winner_reward_start_time:
+            time_since_reward_start = now - self.winner_reward_start_time
+            reward_period_remaining = timedelta(hours=self.total_hours_for_winner_reward) - time_since_reward_start
+            
+            if reward_period_remaining > timedelta(0):
+                # Still in reward period
+                self.current_phase = "winner_reward"
+                logger.info(f"Crash recovery: Continuing winner reward for {self.current_winner[:12]}... ({reward_period_remaining.total_seconds()/3600:.1f}h remaining)")
+                return
+            else:
+                logger.info(f"Crash recovery: Winner reward period has expired")
+                # Clear the winner since period expired
+                self.current_winner = None
+                self.current_phase = "burn_until_submission"
+                self.save_state()
+                return
+        
+        # Check if there was a challenge that ended while we were down
+        if self.last_challenge_end_time and not current_challenge_active:
+            time_since_challenge_end = now - self.last_challenge_end_time
+            
+            if time_since_challenge_end < timedelta(hours=self.total_hours_for_winner_reward):
+                # We're still in the post-challenge winner reward period
+                if self.current_winner:
+                    self.current_phase = "winner_reward"
+                    remaining_time = timedelta(hours=self.total_hours_for_winner_reward) - time_since_challenge_end
+                    logger.info(f"Crash recovery: Restoring winner {self.current_winner[:12]}... reward ({remaining_time.total_seconds()/3600:.1f}h remaining)")
+                    return
+            else:
+                # Winner reward period has expired, should burn
+                logger.info(f"Crash recovery: Winner reward period expired, will burn emissions")
+                self.current_phase = "burn_until_submission"
+                self.current_winner = None  # Clear expired winner
+                self.save_state()
+                return
+        
+        # Default case - determine phase based on current state
+        if current_challenge_active:
+            self.current_phase = "normal"
+        else:
+            self.current_phase = "burn_until_submission"
+        
+        self.save_state()
+        logger.info(f"Crash recovery: Set phase to {self.current_phase}")
+
     
     def should_burn_emissions(self, best_miner_score: float = 0.0) -> bool:
         """Determine if emissions should be burned"""
         now = datetime.now(timezone.utc)
         
         if not self.subnet_start_time:
+            logger.info("No subnet start time - burning emissions")
             return True
         
-        # Phase 1: Initial burn period (2 days from subnet start)
+        # Phase 1: Initial burn period (X days from subnet start)
         if self.current_phase == "initial_burn":
             initial_period_end = self.subnet_start_time + timedelta(days=self.initial_burn_days)
             
             if now < initial_period_end:
                 if best_miner_score > 0:
-                    logger.info("Good submission found during initial burn period")
-                    return False  # Don't burn if good submission found
-                return True  # Burn during initial period if no good submissions
+                    logger.info("Good submission found during initial burn period - transitioning to normal")
+                    self.current_phase = "normal"
+                    self.save_state()
+                    return False
+                logger.info("Initial burn period active - burning emissions")
+                return True
             else:
-                # Initial period ended, check if we have a winner
+                # Initial period ended
                 if best_miner_score > 0:
+                    logger.info("Initial burn period ended, good submission found - transitioning to normal")
                     self.current_phase = "normal"
                     self.save_state()
                     return False
                 else:
+                    logger.info("Initial burn period ended, no good submissions - burning until submission")
                     self.current_phase = "burn_until_submission"
                     self.save_state()
                     return True
         
-        # Phase 2: Winner reward period (3 days after first challenge ends)
+        # Phase 2: Winner reward period
         elif self.current_phase == "winner_reward":
             if self.winner_reward_start_time:
-                reward_period_end = self.winner_reward_start_time + timedelta(days=self.winner_reward_days)
+                reward_period_end = self.winner_reward_start_time + timedelta(hours=self.total_hours_for_winner_reward)
                 if now < reward_period_end:
+                    remaining_hours = (reward_period_end - now).total_seconds() / 3600
+                    logger.info(f"Winner {self.current_winner[:12] if self.current_winner else 'Unknown'}... reward period active - {remaining_hours:.1f}h remaining")
                     return False  # Don't burn during winner reward period
                 else:
-                    # Winner period ended, check for new submissions
+                    # Winner period ended - CLEAR THE WINNER
+                    logger.info(f"Winner reward period expired for {self.current_winner[:12] if self.current_winner else 'Unknown'}... - clearing winner")
+                    self.current_winner = None  # CLEAR WINNER
+                    
                     if best_miner_score > 0:
+                        logger.info("Winner period ended, new good submission found - transitioning to normal")
                         self.current_phase = "normal"
                         self.save_state()
                         return False
                     else:
+                        logger.info("Winner period ended, no new submissions - burning until submission")
                         self.current_phase = "burn_until_submission"
                         self.save_state()
                         return True
@@ -160,21 +278,40 @@ class EmissionManager:
         # Phase 3: Burn until good submission
         elif self.current_phase == "burn_until_submission":
             if best_miner_score > 0:
+                logger.info("Good submission found during burn phase - transitioning to normal")
                 self.current_phase = "normal"
                 self.save_state()
                 return False
+            logger.info("No good submissions found - burning emissions")
             return True
         
         # Phase 4: Normal operation
         elif self.current_phase == "normal":
-            return False
+            if best_miner_score > 0:
+                logger.info("Normal operation with submissions - not burning emissions")
+                return False
+            else:
+                logger.info("Normal operation but no submissions - burning emissions")
+                return True
         
+        logger.info("Unknown phase - burning emissions as fallback")
         return True
     
     def get_reward_hotkey(self, current_best_hotkey: Optional[str] = None) -> Optional[str]:
-        """Get hotkey that should receive rewards"""
-        if self.current_phase == "winner_reward" and hasattr(self, 'current_winner'):
-            return self.current_winner
+        """Get hotkey that should receive rewards - returns None if winner period expired"""
+        if self.current_phase == "winner_reward" and self.current_winner:
+            # Double-check that winner period hasn't expired
+            if self.winner_reward_start_time:
+                now = datetime.now(timezone.utc)
+                reward_period_end = self.winner_reward_start_time + timedelta(hours=self.total_hours_for_winner_reward)
+                if now < reward_period_end:
+                    return self.current_winner
+                else:
+                    # Period expired, clear winner
+                    logger.info(f"Winner reward period expired - clearing winner {self.current_winner[:12]}...")
+                    self.current_winner = None
+                    self.save_state()
+                    return None
         return current_best_hotkey
 
 
@@ -184,14 +321,15 @@ class ValidatorState:
     def __init__(self, state_file: str = "validator_state.json"):
         self.state_file = state_file
         self.current_batch_id: Optional[str] = None
-        self.last_weights: Dict[str, float] = {}
+        # self.last_weights: Dict[str, float] = {}
         self.evaluation_in_progress: bool = False
         self.last_challenge_id: Optional[str] = None
         self.evaluated_batches: set = set()
         self.challenge_best_miners: Dict[str, Tuple[str, float]] = {}  # challenge_id -> (hotkey, score)
-        self.overall_best_miner: Tuple[Optional[str], float] = (None, 0.0)
+        # self.overall_best_miner: Tuple[Optional[str], float] = (None, 0.0)
         self.active_challenges: Dict[str, Dict] = {}  # challenge_id -> challenge_info
         self.expired_challenges: List[str] = []
+        self.current_challenge_best: Tuple[Optional[str], float] = (None, 0.0)  # Current challenge only
         
         self.load_state()
     
@@ -202,16 +340,19 @@ class ValidatorState:
                 with open(self.state_file, 'r') as f:
                     data = json.load(f)
                     self.current_batch_id = data.get('current_batch_id')
-                    self.last_weights = data.get('last_weights', {})
+                    # self.last_weights = data.get('last_weights', {})
                     self.evaluation_in_progress = data.get('evaluation_in_progress', False)
                     self.last_challenge_id = data.get('last_challenge_id')
                     self.evaluated_batches = set(data.get('evaluated_batches', []))
                     self.challenge_best_miners = data.get('challenge_best_miners', {})
                     
-                    overall_best = data.get('overall_best_miner', [None, 0.0])
-                    self.overall_best_miner = (overall_best[0], overall_best[1])
+                    # overall_best = data.get('overall_best_miner', [None, 0.0])
+                    # self.overall_best_miner = (overall_best[0], overall_best[1])
+
+                    current_challenge_best = data.get('current_challenge_best', [None, 0.0])
+                    self.current_challenge_best = (current_challenge_best[0], current_challenge_best[1])
                     
-                    logger.info(f"Loaded validator state: {len(self.last_weights)} last weights")
+                    # logger.info(f"Loaded validator state: {len(self.last_weights)} last weights")
         except Exception as e:
             logger.error(f"Error loading validator state: {e}")
     
@@ -220,16 +361,17 @@ class ValidatorState:
         try:
             data = {
                 'current_batch_id': self.current_batch_id,
-                'last_weights': self.last_weights,
+                # 'last_weights': self.last_weights,
                 'evaluation_in_progress': self.evaluation_in_progress,
                 'last_challenge_id': self.last_challenge_id,
                 'evaluated_batches': list(self.evaluated_batches),
                 'challenge_best_miners': self.challenge_best_miners,
-                'overall_best_miner': list(self.overall_best_miner),
+                # 'overall_best_miner': list(self.overall_best_miner),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 'active_challenges': self.active_challenges,
                 'expired_challenges': self.expired_challenges,
-                'updated_at': datetime.now(timezone.utc).isoformat()
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+                'current_challenge_best': list(self.current_challenge_best),
             }
             with open(self.state_file, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -237,16 +379,16 @@ class ValidatorState:
             logger.error(f"Error saving validator state: {e}")
     
     def update_best_miner(self, challenge_id: str, hotkey: str, score: float):
-        """Update best miner for challenge and overall"""
-        # Update challenge best
+        """Update best miner for challenge and current challenge"""
+        # Update challenge-specific best
         if challenge_id not in self.challenge_best_miners or score > self.challenge_best_miners[challenge_id][1]:
             self.challenge_best_miners[challenge_id] = (hotkey, score)
             logger.info(f"New best miner for {challenge_id}: {hotkey[:12]}... (score: {score})")
         
-        # Update overall best
-        if score > self.overall_best_miner[1]:
-            self.overall_best_miner = (hotkey, score)
-            logger.info(f"New overall best miner: {hotkey[:12]}... (score: {score})")
+        # Update current challenge best (remove overall_best_miner tracking)
+        if score > self.current_challenge_best[1]:
+            self.current_challenge_best = (hotkey, score)
+            logger.info(f"New current challenge best: {hotkey[:12]}... (score: {score})")
         
         self.save_state()
 
@@ -286,6 +428,13 @@ class ChipForgeValidator:
         
         # Batch timing
         self.next_batch_check = datetime.now(timezone.utc)
+
+        self.consecutive_errors = 0
+
+        # EDA Server configuration
+        self.eda_server_url = os.getenv("EDA_SERVER_URL", "http://localhost:8080")
+        self.eda_api_key = os.getenv("EDA_API_KEY", "auth-eda-api-tatsu")
+        self.use_dummy_evaluation = os.getenv("USE_DUMMY_EVALUATION", "false").lower() == "true"
         
         logger.info(f"ChipForge Validator initialized")
         logger.info(f"Validator hotkey: {self.validator_hotkey}")
@@ -293,28 +442,105 @@ class ChipForgeValidator:
 
 
     async def recover_from_crash(self):
-        """Recover state after validator restart"""
+        """Enhanced crash recovery with current challenge focus"""
         try:
-            logger.info("Checking for crash recovery...")
+            logger.info("Starting enhanced crash recovery...")
             
-            # Check if there's a last active challenge
-            if self.state.last_challenge_id:
-                remaining_time = await self.get_challenge_remaining_time(self.state.last_challenge_id)
+            # Check if there's a currently active challenge
+            challenge = await self.get_active_challenge()
+            current_challenge_active = challenge is not None
+            
+            if current_challenge_active:
+                challenge_id = challenge['challenge_id']
                 
+                # Check if it's the same challenge we were working on
+                if self.state.last_challenge_id == challenge_id:
+                    logger.info(f"Continuing with same challenge {challenge_id}")
+                    # Keep current challenge best as-is
+                else:
+                    logger.info(f"New challenge {challenge_id} detected during crash recovery")
+                    # Reset for new challenge
+                    self.state.current_challenge_best = (None, 0.0)
+                    self.state.last_challenge_id = challenge_id
+                    self.state.save_state()
+                
+                remaining_time = await self.get_challenge_remaining_time(challenge_id)
                 if remaining_time and remaining_time > 0:
-                    logger.info(f"Recovering active challenge {self.state.last_challenge_id}: {remaining_time/3600:.1f}h remaining")
-                    # Challenge is still active, sync timing
+                    logger.info(f"Active challenge {challenge_id}: {remaining_time/3600:.1f}h remaining")
                     self.next_batch_check = datetime.now(timezone.utc) + timedelta(seconds=10)
                 else:
-                    logger.info(f"Previous challenge {self.state.last_challenge_id} has expired")
-                    # Mark as expired and clear
-                    if self.state.last_challenge_id not in self.state.expired_challenges:
-                        self.state.expired_challenges.append(self.state.last_challenge_id)
-                    self.state.last_challenge_id = None
-                    self.state.save_state()
-                    
+                    logger.info(f"Challenge {challenge_id} found but expired")
+                    current_challenge_active = False
+            else:
+                logger.info("No active challenge found")
+                # Reset current challenge since no challenge is active
+                self.state.current_challenge_best = (None, 0.0)
+                self.state.last_challenge_id = None
+                self.state.save_state()
+                
+            # Recover emission state - pass current challenge winner if any
+            current_challenge_winner = self.state.current_challenge_best[0] if hasattr(self.state, 'current_challenge_best') else None
+            current_challenge_score = self.state.current_challenge_best[1] if hasattr(self.state, 'current_challenge_best') else 0.0
+            
+            self.emission_manager.recover_emission_state_after_crash(
+                current_challenge_active, 
+                (current_challenge_winner, current_challenge_score) if current_challenge_winner else None
+            )
+            
+            # Log the recovery status
+            if not current_challenge_active and self.emission_manager.current_winner:
+                remaining_time = None
+                if self.emission_manager.winner_reward_start_time:
+                    end_time = self.emission_manager.winner_reward_start_time + timedelta(hours=self.emission_manager.total_hours_for_winner_reward)
+                    remaining_seconds = (end_time - datetime.now(timezone.utc)).total_seconds()
+                    if remaining_seconds > 0:
+                        remaining_time = remaining_seconds / 3600
+                
+                if remaining_time and remaining_time > 0:
+                    logger.info(f"Challenge has expired, decided winner {self.emission_manager.current_winner[:12]}... is taking reward, remaining time {remaining_time:.1f}h")
+                else:
+                    logger.info("Challenge has expired, winner reward period also expired")
+            
+            # Restore winner state if we have current challenge winner
+            if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
+                winner_hotkey, winner_score = self.state.current_challenge_best
+                
+                # Check if this winner should still be getting rewards
+                reward_hotkey = self.emission_manager.get_reward_hotkey(winner_hotkey)
+                if reward_hotkey:
+                    # Try to set weights for the winner if they're still on subnet
+                    uid = self.get_hotkey_uid(winner_hotkey)
+                    if uid is not None:
+                        weights = {winner_hotkey: 1.0}
+                        logger.info(f"Crash recovery: Restoring weights for current challenge winner {winner_hotkey[:12]}... (UID {uid})")
+                        # self.state.last_weights = weights
+                    else:
+                        logger.warning(f"Crash recovery: Current challenge winner {winner_hotkey[:12]}... not found on subnet")
+            
+            # If no current challenge winner but we have historical winners, check emission manager
+            elif self.emission_manager.current_winner:
+                winner_hotkey = self.emission_manager.current_winner
+                
+                # Check if this historical winner should still be getting rewards
+                reward_hotkey = self.emission_manager.get_reward_hotkey(winner_hotkey)
+                if reward_hotkey:
+                    uid = self.get_hotkey_uid(winner_hotkey)
+                    if uid is not None:
+                        weights = {winner_hotkey: 1.0}
+                        logger.info(f"Crash recovery: Restoring weights for emission manager winner {winner_hotkey[:12]}... (UID {uid})")
+                        self.state.last_weights = weights
+                    else:
+                        logger.warning(f"Crash recovery: Emission manager winner {winner_hotkey[:12]}... not found on subnet")
+            
+            # Set appropriate next check time
+            if not current_challenge_active:
+                self.next_batch_check = datetime.now(timezone.utc) + timedelta(seconds=30)
+            
+            logger.info("Enhanced crash recovery completed")
+                        
         except Exception as e:
-            logger.error(f"Error during crash recovery: {e}")
+            logger.error(f"Error during enhanced crash recovery: {e}")
+            logger.error(traceback.format_exc())
 
     
     def _load_private_key(self) -> ed25519.Ed25519PrivateKey:
@@ -560,16 +786,63 @@ class ChipForgeValidator:
             if now < self.next_batch_check:
                 return
             
+            # Sync metagraph to see current miners
+            self.metagraph.sync(subtensor=self.subtensor)
+            
             # Get active challenge
             challenge = await self.get_active_challenge()
+
+            # Check if challenge just expired (we had one before but don't now)
+            if not challenge and self.state.last_challenge_id:
+                logger.info(f"Challenge {self.state.last_challenge_id} has expired")
+                
+                # If we have a current challenge winner, start their reward period
+                if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
+                    winner_hotkey = self.state.current_challenge_best[0]
+                    logger.info(f"Starting winner reward period for {winner_hotkey[:12]}... from expired challenge {self.state.last_challenge_id}")
+                    
+                    # Update emission manager to start winner reward period
+                    self.emission_manager.update_winner(winner_hotkey)
+                    self.emission_manager.mark_challenge_ended()
+                else:
+                    logger.info(f"Challenge {self.state.last_challenge_id} expired but no winner found")
+                    self.emission_manager.mark_challenge_ended()
+                
+                # Clear the last challenge ID since it's expired
+                self.state.last_challenge_id = None
+                self.state.save_state()
+
             if not challenge:
-                # No active challenge, use emission management
-                if self.emission_manager.should_burn_emissions():
-                    logger.info("Burning emissions - no active challenge")
+                # No active challenge - check emission manager and current challenge best
+                current_winner = self.emission_manager.current_winner
+                
+                if self.emission_manager.should_burn_emissions(0.0):  # Use 0.0 since no active challenge
+                    if current_winner:
+                        logger.info(f"No active challenge, winner {current_winner[:12]}... reward period expired - burning emissions")
+                    else:
+                        logger.info("No active challenge, no submissions found - burning emissions")
                     self.set_burn_weights()
-                elif self.state.last_weights:
-                    logger.info("Setting last known weights - no active challenge")
-                    self.set_weights(self.state.last_weights)
+                else:
+                    # Check if we have a current challenge winner who should still get rewards
+                    if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
+                        current_winner_hotkey = self.state.current_challenge_best[0]
+                        reward_hotkey = self.emission_manager.get_reward_hotkey(current_winner_hotkey)
+                        
+                        if reward_hotkey:
+                            uid = self.get_hotkey_uid(reward_hotkey)
+                            if uid is not None:
+                                weights = {reward_hotkey: 1.0}
+                                logger.info(f"No active challenge, but rewarding current best miner {reward_hotkey[:12]}...")
+                                self.set_weights(weights)
+                            else:
+                                logger.info("No active challenge, current winner not on subnet - burning emissions")
+                                self.set_burn_weights()
+                        else:
+                            logger.info("No active challenge, current winner reward expired - burning emissions")
+                            self.set_burn_weights()
+                    else:
+                        logger.info("No active challenge, no current winner - burning emissions")
+                        self.set_burn_weights()
                 
                 self.next_batch_check = now + timedelta(seconds=10)
                 return
@@ -579,48 +852,58 @@ class ChipForgeValidator:
             # Notify miners if challenge changed
             if self.state.last_challenge_id != challenge_id:
                 await self.notify_miners_challenge_active(challenge_id, challenge['github_url'])
+
+                # Reset current challenge best for new challenge
+                logger.info(f"New challenge {challenge_id} started - resetting current challenge best score")
+                self.state.current_challenge_best = (None, 0.0)
+                
+                # Clean up old evaluated batches (keep only last 50 to prevent infinite growth)
+                if len(self.state.evaluated_batches) > 50:
+                    # Convert to list, sort, and keep only recent ones
+                    batch_list = list(self.state.evaluated_batches)
+                    self.state.evaluated_batches = set(batch_list[-50:])
+                    logger.info(f"Cleaned up old evaluated batches, keeping {len(self.state.evaluated_batches)}")
+                
                 self.state.last_challenge_id = challenge_id
                 self.state.save_state()
             
             # Get current batch
             batch = await self.get_current_batch(challenge_id)
             if not batch:
-                # No batch available, apply emission management
-                best_score = self.state.overall_best_miner[1]
+                # No batch available - use current challenge best, not historical best
+                current_challenge_score = self.state.current_challenge_best[1] if hasattr(self.state, 'current_challenge_best') else 0.0
                 
-                if self.emission_manager.should_burn_emissions(best_score):
-                    logger.info("Burning emissions - no submissions or in burn phase")
+                if self.emission_manager.should_burn_emissions(current_challenge_score):
+                    logger.info("Burning emissions - no submissions in current challenge")
                     self.set_burn_weights()
                 else:
                     # Get reward hotkey from emission manager
-                    reward_hotkey = self.emission_manager.get_reward_hotkey(self.state.overall_best_miner[0])
+                    reward_hotkey = self.emission_manager.get_reward_hotkey(self.state.current_challenge_best[0] if hasattr(self.state, 'current_challenge_best') else None)
                     if reward_hotkey:
-                        weights = {reward_hotkey: 1.0}
-                        logger.info(f"Setting winner weights: {reward_hotkey[:12]}...")
-                        self.set_weights(weights)
-                    elif self.state.last_weights:
-                        logger.info("Setting last known weights")
-                        self.set_weights(self.state.last_weights)
+                        uid = self.get_hotkey_uid(reward_hotkey)
+                        if uid is not None:
+                            weights = {reward_hotkey: 1.0}
+                            logger.info(f"Setting current challenge winner weights: {reward_hotkey[:12]}...")
+                            self.set_weights(weights)
+                        else:
+                            logger.info("Current challenge winner not on subnet - burning emissions")
+                            self.set_burn_weights()
+                    else:
+                        # No current challenge winner and no reward period - should burn
+                        logger.info("No current challenge winner - burning emissions")
+                        self.set_burn_weights()
                 return
             
             batch_id = batch['batch_id']
             logger.info(f"Processing batch {batch_id} with {len(batch.get('submissions', []))} submissions")
+            
             # Check if we've already processed this batch
-            print("##################### evaluated batches are: ")
-            print(self.state.evaluated_batches)
-
             if batch_id in self.state.evaluated_batches:
                 logger.debug(f"Batch {batch_id} already processed")
                 return
             
-            # Check if we're already processing a batch
-            # if self.state.evaluation_in_progress:
-            #     logger.debug("Evaluation already in progress")
-            #     return
-            
             # Process the batch
             logger.info(f"Starting to process batch {batch_id}")
-            # self.state.evaluation_in_progress = True  # Make sure this is set
             try:
                 # Add timeout to prevent hanging forever
                 success = await asyncio.wait_for(
@@ -635,30 +918,63 @@ class ChipForgeValidator:
                 logger.error(f"Exception during batch processing: {e}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 success = False
-            finally:
-                # self.state.evaluation_in_progress = False
-                pass
+            
             logger.info(f"Batch processing completed with success: {success}")
             
             if success:
                 # Notify miners about batch completion
                 await self.notify_miners_batch_complete(batch_id)
             
-            if not success and self.state.last_weights:
-                logger.info("Batch processing failed, using last known weights")
-                self.set_weights(self.state.last_weights)
+            if not success:
+                # Use current challenge winner as fallback, or burn if none
+                if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
+                    current_winner = self.state.current_challenge_best[0]
+                    uid = self.get_hotkey_uid(current_winner)
+                    if uid is not None:
+                        weights = {current_winner: 1.0}
+                        logger.info(f"Batch processing failed, using current challenge winner {current_winner[:12]}...")
+                        self.set_weights(weights)
+                    else:
+                        logger.info("Batch processing failed, current winner not on subnet - burning emissions")
+                        self.set_burn_weights()
+                else:
+                    logger.info("Batch processing failed, no current winner - burning emissions")
+                    self.set_burn_weights()
+
+            self.consecutive_errors = 0
             
         except Exception as e:
-            logger.error(f"Error in evaluation cycle: {e}")
+            self.consecutive_errors += 1
+            
+            # Exponential backoff: 30s, 60s, 120s, 240s, max 300s
+            backoff_time = min(300, 30 * (2 ** min(self.consecutive_errors - 1, 4)))
+            
+            logger.error(f"Error in evaluation cycle (#{self.consecutive_errors}): {e}")
             logger.error(traceback.format_exc())
+            logger.info(f"Will retry in {backoff_time} seconds")
             
-            # Fallback logic
-            best_score = self.state.overall_best_miner[1]
+            # Update next check time with backoff
+            self.next_batch_check = datetime.now(timezone.utc) + timedelta(seconds=backoff_time)
             
-            if self.emission_manager.should_burn_emissions(best_score):
-                self.set_burn_weights()
-            elif self.state.last_weights:
-                self.set_weights(self.state.last_weights)
+            # After too many consecutive errors, use fallback logic
+            if self.consecutive_errors >= 5:
+                logger.warning("Multiple consecutive errors, applying fallback emission logic")
+                best_score = 0.0  # No active challenge means no current submissions
+                
+                if self.emission_manager.should_burn_emissions(best_score):
+                    self.set_burn_weights()
+                elif hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
+                    # Use current challenge winner as fallback
+                    current_winner = self.state.current_challenge_best[0]
+                    uid = self.get_hotkey_uid(current_winner)
+                    if uid is not None:
+                        weights = {current_winner: 1.0}
+                        logger.info(f"Error fallback: Using current challenge winner {current_winner[:12]}...")
+                        self.set_weights(weights)
+                    else:
+                        self.set_burn_weights()
+                else:
+                    self.set_burn_weights()
     
     def set_burn_weights(self):
         """Set weight 1.0 for uid 0 and 0.0 for all others to burn emissions"""
@@ -844,9 +1160,8 @@ class ChipForgeValidator:
             # Extract hotkeys from filenames
             submission_hotkeys = self.extract_hotkeys_from_filenames(batch_id, successful_submissions)
             
-            # Get current challenge-wide best score and hotkey
-            current_best_score = self.state.overall_best_miner[1]  # (hotkey, score)
-            current_best_hotkey = self.state.overall_best_miner[0]
+            current_best_score = self.state.current_challenge_best[1] if hasattr(self.state, 'current_challenge_best') else 0.0
+            current_best_hotkey = self.state.current_challenge_best[0] if hasattr(self.state, 'current_challenge_best') else None
             
             logger.info(f"Current challenge best: {current_best_hotkey[:12] if current_best_hotkey else 'None'}... -> {current_best_score}")
             
@@ -862,24 +1177,27 @@ class ChipForgeValidator:
                     new_best_score = overall_score
                     new_champion = hotkey
                     logger.info(f"New challenge champion found: {hotkey[:12]}... -> {overall_score} (beats previous: {current_best_score})")
-            
+
             # Update challenge-wide best if we found a new champion
             if new_champion:
                 self.state.update_best_miner(challenge_id, new_champion, new_best_score)
+    
+                # Update current challenge best (separate tracking)
+                self.state.current_challenge_best = (new_champion, new_best_score)
+                
+                # Update emission manager with new winner
+                self.emission_manager.update_winner(new_champion)
                 
                 # Check if new champion is on subnet and get UID
                 try:
                     uid = self.get_hotkey_uid(new_champion)
                     if uid is not None:
                         # Set weights: 1.0 for new champion, 0.0 for others
-                        weights = {uid: 1.0}
-                        logger.info(f"Setting NEW CHAMPION weights: UID {uid} ({new_champion[:12]}...) = 1.0, score: {new_best_score}")
+                        weights = {new_champion: 1.0}
+                        logger.info(f"Setting NEW CHAMPION weights: {new_champion[:12]}... (UID {uid}) = 1.0, score: {new_best_score}")
                         
                         weight_success = self.set_weights(weights)
-                        if weight_success:
-                            self.state.last_weights = weights
-                            logger.info(f"Successfully set new champion weights")
-                        else:
+                        if not weight_success:
                             logger.error("Failed to set weights, burning emissions")
                             self.set_burn_weights()
                     else:
@@ -893,31 +1211,34 @@ class ChipForgeValidator:
                 # No new champion found - check emission management policy
                 logger.info(f"No submissions beat challenge best of {current_best_score}")
                 
-                # You can implement different policies here:
-                if current_best_score > 0 and current_best_hotkey:
-                    # Policy: Continue rewarding current champion
+                # Get reward hotkey from emission manager (considers winner reward period)
+                reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey)
+                should_burn = self.emission_manager.should_burn_emissions(current_best_score)
+                
+                if reward_hotkey and not should_burn:
+                    # Continue rewarding current winner/champion
                     try:
-                        uid = self.get_hotkey_uid(current_best_hotkey)
+                        uid = self.get_hotkey_uid(reward_hotkey)
                         if uid is not None:
-                            weights = {uid: 1.0}
-                            logger.info(f"Continuing to reward current champion: UID {uid} ({current_best_hotkey[:12]}...) = 1.0")
+                            weights = {reward_hotkey: 1.0}
+                            logger.info(f"Challenge active, winner {reward_hotkey[:12]}... taking reward until next good submission")
                             
                             weight_success = self.set_weights(weights)
-                            if weight_success:
-                                self.state.last_weights = weights
-                                logger.info(f"Successfully set champion weights")
-                            else:
+                            if not weight_success:
                                 logger.error("Failed to set weights, burning emissions")
                                 self.set_burn_weights()
                         else:
-                            logger.warning(f"Current champion {current_best_hotkey[:12]}... not found on subnet, burning emissions")
+                            logger.warning(f"Reward target {reward_hotkey[:12]}... not found on subnet, burning emissions")
                             self.set_burn_weights()
                     except Exception as e:
-                        logger.error(f"Error getting UID for current champion: {e}, burning emissions")
+                        logger.error(f"Error getting UID for reward target: {e}, burning emissions")
                         self.set_burn_weights()
                 else:
-                    # No champion yet or score is 0, burn emissions
-                    logger.info("No champion exists yet or score is 0, burning emissions")
+                    # Should burn emissions
+                    if self.emission_manager.current_winner:
+                        logger.info("Challenge active, submissions found but winner reward period expired - burning emissions")
+                    else:
+                        logger.info("Challenge active, submissions checking but no qualified winner - burning emissions")
                     self.set_burn_weights()
             
             # Mark batch as processed
@@ -1203,10 +1524,101 @@ class ChipForgeValidator:
         return submission_hotkeys
     
     async def evaluate_submissions_with_eda_server(self, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
-        """Send submissions to EDA server for evaluation (dummy implementation)"""
+        """Send submissions to EDA server for evaluation"""
         logger.info(f"Evaluating {len(submissions)} submissions with EDA server")
         
-        # TODO: Replace with actual EDA server integration
+        # Fallback to dummy evaluation if configured
+        if self.use_dummy_evaluation:
+            return await self._dummy_evaluate_submissions(submissions)
+        
+        evaluations = {}
+        
+        for submission_id, submission_data in submissions.items():
+            try:
+                logger.info(f"Evaluating submission {submission_id} with EDA server")
+                
+                # Create a temporary file for the submission
+                import tempfile
+                import io
+                
+                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_file:
+                    temp_file.write(submission_data)
+                    temp_file.flush()
+                    
+                    # Prepare the request to EDA server
+                    import aiohttp
+                    
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=900)) as session:
+                        with open(temp_file.name, 'rb') as zip_file:
+                            form_data = aiohttp.FormData()
+                            form_data.add_field('design_zip', zip_file, 
+                                            filename=f'{submission_id}.zip', 
+                                            content_type='application/zip')
+                            
+                            headers = {'Authorization': f'Bearer {self.eda_api_key}'}
+                            
+                            async with session.post(
+                                f"{self.eda_server_url}/evaluate",
+                                data=form_data,
+                                headers=headers
+                            ) as response:
+                                if response.status == 200:
+                                    result = await response.json()
+                                    
+                                    # Transform EDA server response to expected format
+                                    evaluations[submission_id] = self._transform_eda_response(result, submission_id)
+                                    logger.info(f"Successfully evaluated {submission_id}")
+                                else:
+                                    error_text = await response.text()
+                                    logger.error(f"EDA server error for {submission_id}: {response.status} - {error_text}")
+                                    # Use dummy evaluation as fallback
+                                    evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
+                    
+                    # Clean up temporary file
+                    import os
+                    os.unlink(temp_file.name)
+                    
+            except Exception as e:
+                logger.error(f"Error evaluating submission {submission_id}: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                
+                # Use dummy evaluation as fallback
+                evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
+        
+        logger.info(f"EDA server evaluation completed for {len(evaluations)} submissions")
+        return evaluations
+
+    def _transform_eda_response(self, eda_result: Dict, submission_id: str) -> Dict:
+        """Transform EDA server response to expected format"""
+        # Adjust this based on your actual EDA server response format
+        return {
+            'overall_score': eda_result.get('overall_score', 0),
+            'functionality_score': eda_result.get('functionality_score', 0),
+            'area_score': eda_result.get('area_score', 0),
+            'delay_score': eda_result.get('delay_score', 0),
+            'power_score': eda_result.get('power_score', 0),
+            'passed_testbench': eda_result.get('passed_testbench', False),
+            'evaluation_notes': eda_result.get('evaluation_notes', f"EDA evaluation for {submission_id}")
+        }
+
+    def _generate_fallback_evaluation(self, submission_id: str) -> Dict:
+        """Generate fallback evaluation when EDA server fails"""
+        import random
+        logger.warning(f"Using fallback evaluation for {submission_id}")
+        
+        return {
+            'overall_score': 0.0,
+            'functionality_score': 0.0,
+            'area_score': 0.0,
+            'delay_score': 0.0,
+            'power_score': 0.0,
+            'passed_testbench': False,
+            'evaluation_notes': f"Fallback evaluation for {submission_id} (EDA server unavailable)"
+        }
+
+    async def _dummy_evaluate_submissions(self, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
+        """Original dummy evaluation for testing"""
         evaluations = {}
         for submission_id in submissions.keys():
             import random
@@ -1220,8 +1632,7 @@ class ChipForgeValidator:
                 'evaluation_notes': f"Dummy evaluation for {submission_id}"
             }
         
-        await asyncio.sleep(2)
-        logger.info("EDA server evaluation completed")
+        await asyncio.sleep(2)  # Simulate processing time
         return evaluations
     
     async def submit_all_evaluations(self, challenge_id: str, evaluations: Dict[str, Dict]) -> Dict[str, bool]:
