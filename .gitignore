@@ -161,6 +161,7 @@ cython_debug/
 
 # Editors
 .vscode/settings.json
+.circleci
 
 # Ignore all contents of the logs folder
 logs/*
