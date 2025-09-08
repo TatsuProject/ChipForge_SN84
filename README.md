@@ -1,4 +1,4 @@
-# ChipForge Subnet
+# ChipForge - Subnet # 84
 
 ChipForge is a Bittensor subnet that incentivizes the development of optimized hardware designs through competitive evaluation and scoring. The subnet challenges participants to create efficient FPGA and ASIC implementations of various digital circuits, rewarding those who achieve the best performance across multiple metrics.
 
