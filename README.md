@@ -259,7 +259,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 - **Discord**: [ChipForge - SN84](https://discord.com/channels/799672011265015819/1408463235082092564)
-- **Email**: contact@tatsuecosystem.io
 
 ## Roadmap
 
