@@ -1,23 +1,25 @@
-# ChipForge - Subnet # 84
+# ChipForge (SN84)
 
-ChipForge is a Bittensor subnet that incentivizes the development of optimized hardware designs through competitive evaluation and scoring. The subnet challenges participants to create efficient FPGA and ASIC implementations of various digital circuits, rewarding those who achieve the best performance across multiple metrics.
+ChipForge (SN84) introduces the first digital design subnet for decentralized hardware innovation. This subnet enables miners to compete in designing real silicon. Processor development is organized into on-chain challenges — spanning AI accelerators, cryptographic modules, mini-GPUs, and other critical components. Participants download specifications, leverage AI tools, and submit complete Verilog/SystemVerilog implementations. The highest-quality designs earn rewards while contributing to fully manufacturable chips.
+
+In the short term, ChipForge focuses on advancing digital hardware design, with future applications across IoT, robotics, edge devices, and post-quantum security. Our roadmap includes progressing from design to full-scale fabrication within a year. Revenue from design IPs and fabricated chips will be reinvested into the ecosystem, ensuring sustainable value creation. Backed by the Tatsu validator team and open to strategic partnerships, ChipForge marks the beginning of a new era — decentralized, collaborative, and on-chain digital design.
 
 ## Overview
 
 ChipForge operates as a competitive platform where:
 - **Miners** submit hardware design solutions (Verilog/SystemVerilog)
-- **Validators** evaluate submissions using industry-standard EDA tools
+- **Validators** evaluate submissions using industry-standard EDA tools (Verilator, Yosys, Icarus, Openlane)
 - **Challenges** are rotated periodically with different design requirements
-- **Rewards** are distributed based on performance metrics and competitive scoring
+- **Rewards** are distributed based on performance metrics and competitive scoring - This is a winner-takes-all reward mechanism
 
 ## Architecture
 
 ### Core Components
 
-1. **Challenge Server** - Manages challenges, submissions, and evaluations
+1. **Chipforge Challenge Server** - Manages challenges, submissions, and evaluations
 2. **Miners** - Submit optimized hardware designs for active challenges
-3. **Validators** - Download, evaluate, and score miner submissions
-4. **EDA Server** - Performs synthesis, place & route, and timing analysis
+3. **Validators** - Download, evaluate, and score miner submissions against provided test benches and test cases
+4. **Chipforge EDA Server** - Performs synthesis, place & route, and timing analysis
 
 ### Workflow
 
@@ -33,24 +35,40 @@ ChipForge operates as a competitive platform where:
 
 - Python 3.12
 - Bittensor wallet with registered hotkey
-- Access to challenge server API
-- EDA tools (for validators)
+- Access to Chipforge Challenge Server API
+- Chipforge EDA Server (for validators)
 
 ### For Miners
 
 #### Installation
 
+To create wallets, visit this:
+```
+https://docs.learnbittensor.org/btcli
+```
+
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/TatsuProject/ChipForge_SN84
 cd chipforge-subnet
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Configure your wallet
-btcli wallet create --wallet.name miner --wallet.hotkey default
+pip install -e .
 ```
+
+#### Running a Miner
+
+Set parameters in .env file and run:
+```bash
+./start_miner
+```
+
+#### Miner Responsibilities
+
+- Download challenge
+- Solve it 
+- Submit the solution
 
 #### Submitting Solutions
 
@@ -73,20 +91,15 @@ Solutions must be packaged as ZIP files containing:
 
 ### For Validators
 
-#### Installation
-
-```bash
-# Install validator dependencies
-pip install -r validator_requirements.txt
-
-# Configure EDA tools (Vivado, Quartus, etc.)
-# Set up validator secrets and API keys
-```
-
 #### Running a Validator
 
+Pull and run Chipforge EDA Server:
+```
+https://github.com/TatsuProject/chipforge_eda_server
+```
+
+Set parameters in .env file and run:
 ```bash
-# Set parameters in .env file and run
 ./start_validator
 ```
 
@@ -96,10 +109,11 @@ pip install -r validator_requirements.txt
 - Evaluate designs using EDA tools
 - Submit scores based on multiple metrics:
   - **Functionality** (0-100): Correctness and testbench passing
-  - **Area** (0-100): Resource utilization efficiency
-  - **Delay** (0-100): Timing performance
-  - **Power** (0-100): Power consumption optimization
-  - **Overall** (0-100): Weighted combination of all metrics
+  - These will be part of validation mechanism in future:
+    - **Area** (0-100): Resource utilization efficiency
+    - **Delay** (0-100): Timing performance
+    - **Power** (0-100): Power consumption optimization
+    - **Overall** (0-100): Weighted combination of all metrics
 
 ## Evaluation Metrics
 
@@ -134,30 +148,14 @@ Each submission is evaluated across four key metrics:
 - Only submissions that beat the current challenge-wide best score receive rewards
 - Weights are set to reward the highest-scoring submission
 - Emission burning occurs when no submissions exceed quality thresholds
+- The winner of a challenge will keep getting reward for specific time after challenge expiration
 
 ## Challenge Types
 
 ### Current Challenge Categories
 
-1. **Digital Signal Processing**
-   - FIR/IIR filter implementations
-   - FFT/IFFT processors
-   - Digital modulators/demodulators
-
-2. **Arithmetic Units**
-   - Multipliers and dividers
-   - Floating-point units
-   - Specialized arithmetic (e.g., modular arithmetic)
-
-3. **Communication Interfaces**
-   - UART, SPI, I2C controllers
-   - Ethernet MAC implementations
-   - Protocol processors
-
-4. **Custom Logic**
-   - Application-specific designs
-   - Algorithm implementations
-   - System-on-chip components
+1. **RISC-V based Processors**
+2. **AI Accelerators**
 
 ## API Reference
 
@@ -194,14 +192,13 @@ The subnet uses a dynamic batch system:
 
 - **Signature-based auth**: All API calls require Ed25519 signatures
 - **Validator secrets**: Additional secret keys for validator endpoints
-- **Hotkey verification**: Ensures submissions come from registered miners
+- **Hotkey verification**: Ensures submissions come from registered miners, and evaluated scores come from registered validators
 - **Timestamp validation**: Prevents replay attacks
 
 ### Data Integrity
 
 - **File hashing**: All submissions are verified with SHA256 hashes
 - **Signature verification**: Using Bittensor's native signing methods
-- **Audit logging**: Complete audit trail of all operations
 
 ## Monitoring
 
@@ -211,13 +208,6 @@ The subnet uses a dynamic batch system:
 # Check challenge server health
 curl http://challenge-server:8000/health
 ```
-
-### Logging
-
-- Structured JSON logging for all components
-- Separate log levels for development and production
-- Audit logs for security-sensitive operations
-- Performance metrics and timing data
 
 ## Troubleshooting
 
@@ -264,7 +254,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Upcoming Features
 
-- ...
+- Additional challenge categories
+- Enhanced evaluation metrics
+- Improved toolchain integration
 
 ### Version History
 
