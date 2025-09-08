@@ -258,10 +258,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- **Documentation**: [https://docs.chipforge.subnet](https://docs.chipforge.subnet)
-- **Discord**: [ChipForge Community](https://discord.gg/chipforge)
-- **GitHub Issues**: [Report bugs and feature requests](https://github.com/chipforge/subnet/issues)
-- **Email**: support@chipforge.subnet
+- **Discord**: [ChipForge - SN84](https://discord.com/channels/799672011265015819/1408463235082092564)
+- **Email**: contact@tatsuecosystem.io
 
 ## Roadmap
 
