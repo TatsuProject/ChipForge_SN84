@@ -1,9 +1,9 @@
 # ChipForge Subnet Requirements
 # Core Bittensor packages
-bittensor==9.0.0rc5
-bittensor-cli==9.0.0rc2
+bittensor==9.10.1
+bittensor-cli==9.11.0
 bittensor-wallet==3.0.2
-bt-decode==0.5.0a2
+bt-decode==0.6.0
 
 # Async HTTP and file handling
 aiohttp==3.10.11

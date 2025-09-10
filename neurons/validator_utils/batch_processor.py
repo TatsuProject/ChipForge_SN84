@@ -110,7 +110,7 @@ class BatchProcessor:
             
             # Evaluate with EDA server
             logger.info(f"Evaluating {len(downloaded_submissions)} submissions with EDA server")
-            evaluations = await self.api_client.evaluate_submissions_with_eda_server(downloaded_submissions)
+            evaluations = await self.api_client.evaluate_submissions_with_eda_server(challenge_id, downloaded_submissions)
             if not evaluations:
                 logger.error(f"No evaluations received from EDA server")
                 return False

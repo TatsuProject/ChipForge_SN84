@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from cryptography.hazmat.primitives.asymmetric import ed25519
+import zipfile
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class APIClient:
         
         # EDA Server configuration
         self.eda_server_url = os.getenv("EDA_SERVER_URL", "http://localhost:8080")
-        self.eda_api_key = os.getenv("EDA_API_KEY", "auth-eda-api-tatsu")
+        self.eda_api_key = os.getenv("EDA_API_KEY", "eda-auth-key")
         self.use_dummy_evaluation = os.getenv("USE_DUMMY_EVALUATION", "false").lower() == "true"
         
         # Validator authentication
@@ -421,61 +422,121 @@ class APIClient:
         
         return submission_hotkeys
     
-    async def evaluate_submissions_with_eda_server(self, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
-        """Send submissions to EDA server for evaluation"""
-        logger.info(f"Evaluating {len(submissions)} submissions with EDA server")
+    async def evaluate_submissions_with_eda_server(self, challenge_id: str, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
+        """Send submissions to EDA server for evaluation with test cases"""
+        logger.info(f"Evaluating {len(submissions)} submissions with EDA server using test cases")
         
         # Fallback to dummy evaluation if configured
         if self.use_dummy_evaluation:
             return await self._dummy_evaluate_submissions(submissions)
         
+        # Get test case files
+        evaluator_py_path, evaluator_zip_path, top_module = self.get_testcase_files(challenge_id)
+        
+        # Verify test case files exist
+        if not evaluator_py_path.exists():
+            logger.error(f"Evaluator Python file not found: {evaluator_py_path}")
+            return await self._dummy_evaluate_submissions(submissions)
+            
+        if not evaluator_zip_path.exists():
+            logger.error(f"Evaluator zip file not found: {evaluator_zip_path}")
+            return await self._dummy_evaluate_submissions(submissions)
+            
+        if not top_module:
+            logger.error("Top module not found or empty")
+            return await self._dummy_evaluate_submissions(submissions)
+        
+        logger.info(f"Using test case files:")
+        logger.info(f"  Evaluator Python: {evaluator_py_path}")
+        logger.info(f"  Evaluator Zip: {evaluator_zip_path}")
+        logger.info(f"  Top Module: {top_module}")
+        
         evaluations = {}
         
         for submission_id, submission_data in submissions.items():
             try:
-                logger.info(f"Evaluating submission {submission_id} with EDA server")
+                logger.info(f"Evaluating submission {submission_id} with EDA server and test cases")
                 
-                # Create a temporary file for the submission
-                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_file:
-                    temp_file.write(submission_data)
-                    temp_file.flush()
+                # Create temporary files for submission and test cases
+                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as design_temp:
+                    design_temp.write(submission_data)
+                    design_temp.flush()
                     
-                    # Prepare the request to EDA server
-                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=900)) as session:
-                        with open(temp_file.name, 'rb') as zip_file:
-                            form_data = aiohttp.FormData()
-                            form_data.add_field('design_zip', zip_file, 
-                                            filename=f'{submission_id}.zip', 
-                                            content_type='application/zip')
-                            
-                            headers = {'Authorization': f'Bearer {self.eda_api_key}'}
-                            
+                    # Create timeout for each individual submission
+                    timeout = aiohttp.ClientTimeout(total=900)  # 15 minutes per submission
+                    
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        # Prepare multipart form data
+                        form_data = aiohttp.FormData()
+                        
+                        # Add design zip
+                        with open(design_temp.name, 'rb') as design_file:
+                            form_data.add_field('design_zip', design_file.read(), 
+                                              filename=f'{submission_id}.zip',
+                                              content_type='application/zip')
+                        
+                        # Add evaluator Python file
+                        with open(evaluator_py_path, 'rb') as evaluator_py_file:
+                            form_data.add_field('evaluator_py', evaluator_py_file.read(),
+                                              filename=f'{challenge_id}_evaluator.py',
+                                              content_type='application/x-python')
+                        
+                        # Add evaluator zip file
+                        with open(evaluator_zip_path, 'rb') as evaluator_zip_file:
+                            form_data.add_field('evaluator_zip', evaluator_zip_file.read(),
+                                              filename=f'{challenge_id}_evaluator.zip',
+                                              content_type='application/zip')
+                        
+                        # Add top_module as form field
+                        form_data.add_field('top_module', top_module)
+                        
+                        # Headers
+                        headers = {'Authorization': f'Bearer {self.eda_api_key}'}
+                        
+                        logger.info(f"Sending evaluation request for {submission_id}:")
+                        logger.info(f"  Design zip size: {len(submission_data)} bytes")
+                        logger.info(f"  Evaluator py size: {evaluator_py_path.stat().st_size} bytes")
+                        logger.info(f"  Evaluator zip size: {evaluator_zip_path.stat().st_size} bytes")
+                        logger.info(f"  Top module: {top_module}")
+                        
+                        try:
                             async with session.post(
                                 f"{self.eda_server_url}/evaluate",
                                 data=form_data,
                                 headers=headers
                             ) as response:
+                                logger.info(f"EDA server response status for {submission_id}: {response.status}")
+                                
                                 if response.status == 200:
                                     result = await response.json()
+                                    logger.info(f"Successfully evaluated {submission_id} with EDA server")
+                                    logger.info(f"EDA response: {result}")
                                     
                                     # Transform EDA server response to expected format
                                     evaluations[submission_id] = self._transform_eda_response(result, submission_id)
-                                    logger.info(f"Successfully evaluated {submission_id}")
+                                    
                                 else:
                                     error_text = await response.text()
                                     logger.error(f"EDA server error for {submission_id}: {response.status} - {error_text}")
-                                    # Use dummy evaluation as fallback
+                                    # Use fallback evaluation
                                     evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
+                                    
+                        except asyncio.TimeoutError:
+                            logger.error(f"Timeout evaluating {submission_id} with EDA server")
+                            evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
+                        except Exception as eval_error:
+                            logger.error(f"Exception during EDA evaluation for {submission_id}: {eval_error}")
+                            evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
                     
-                    # Clean up temporary file
-                    os.unlink(temp_file.name)
+                    # Clean up temporary design file
+                    os.unlink(design_temp.name)
                     
             except Exception as e:
                 logger.error(f"Error evaluating submission {submission_id}: {e}")
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 
-                # Use dummy evaluation as fallback
+                # Use fallback evaluation
                 evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
         
         logger.info(f"EDA server evaluation completed for {len(evaluations)} submissions")
@@ -604,3 +665,103 @@ class APIClient:
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
+
+    async def download_test_cases(self, challenge_id: str) -> bool:
+        """Download and extract test cases for a challenge"""
+        try:
+            logger.info(f"Downloading test cases for challenge {challenge_id}")
+            
+            url = f"{self.api_url}/api/v1/challenges/{challenge_id}/test_cases/download"
+            
+            # Create signature for authentication
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            message = f"{self.validator_hotkey}{timestamp}"
+            signature = self.create_signature(message)
+            
+            headers = {
+                'X-Validator-Secret': self.validator_secret
+            }
+            
+            params = {
+                'validator_hotkey': self.validator_hotkey,
+                'signature': signature,
+                'timestamp': timestamp
+            }
+            
+            logger.info(f"Requesting test cases from: {url}")
+            
+            async with self.session.get(url, headers=headers, params=params, timeout=60) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    logger.info(f"Downloaded test cases: {len(content)} bytes")
+                    
+                    # Create test cases directory
+                    testcases_dir = self.base_dir / 'testcases'
+                    testcases_dir.mkdir(exist_ok=True)
+                    
+                    # Save the zip file
+                    zip_path = testcases_dir / f"{challenge_id}_testcases.zip"
+                    async with aiofiles.open(zip_path, 'wb') as f:
+                        await f.write(content)
+                    
+                    # Extract the zip file
+                    
+                    challenge_testcases_dir = testcases_dir / challenge_id
+                    challenge_testcases_dir.mkdir(exist_ok=True)
+                    
+                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(challenge_testcases_dir)
+                    
+                    logger.info(f"Test cases extracted to: {challenge_testcases_dir}")
+                    
+                    # Verify expected files exist
+                    expected_files = [
+                        f"{challenge_id}_evaluator.py",
+                        f"{challenge_id}_evaluator.zip", 
+                        f"{challenge_id}_evaluator.txt"
+                    ]
+                    
+                    missing_files = []
+                    for expected_file in expected_files:
+                        if not (challenge_testcases_dir / expected_file).exists():
+                            missing_files.append(expected_file)
+                    
+                    if missing_files:
+                        logger.warning(f"Some expected files missing: {missing_files}")
+                    else:
+                        logger.info("All expected test case files found")
+                    
+                    return True
+                    
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Failed to download test cases: {response.status} - {error_text}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Error downloading test cases for {challenge_id}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+    
+    def get_testcase_files(self, challenge_id: str) -> tuple:
+        """Get test case files for a challenge"""
+        testcases_dir = self.base_dir / 'testcases' / challenge_id
+        
+        evaluator_py_path = testcases_dir / f"{challenge_id}_evaluator.py"
+        evaluator_zip_path = testcases_dir / f"{challenge_id}_evaluator.zip"
+        evaluator_txt_path = testcases_dir / f"{challenge_id}_evaluator.txt"
+        
+        # Read top_module from txt file
+        top_module = ""
+        if evaluator_txt_path.exists():
+            try:
+                with open(evaluator_txt_path, 'r') as f:
+                    top_module = f.read().strip()
+                logger.info(f"Loaded top_module from {challenge_id}_evaluator.txt: {top_module}")
+            except Exception as e:
+                logger.error(f"Error reading top_module from txt file: {e}")
+        else:
+            logger.warning(f"Top module file not found: {evaluator_txt_path}")
+        
+        return evaluator_py_path, evaluator_zip_path, top_module

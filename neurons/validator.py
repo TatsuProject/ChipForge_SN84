@@ -14,6 +14,15 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress third-party debug logs
+logging.getLogger('async_substrate_interface').setLevel(logging.WARNING)
+logging.getLogger('websockets').setLevel(logging.WARNING)
+logging.getLogger('substrate_interface').setLevel(logging.WARNING)
+logging.getLogger('scalecodec').setLevel(logging.WARNING)
+logging.getLogger('bittensor').setLevel(logging.INFO)  # Keep bittensor at INFO
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('aiohttp').setLevel(logging.WARNING)
+
 import traceback
 import argparse
 from datetime import datetime, timezone, timedelta
@@ -251,6 +260,18 @@ class ChipForgeValidator:
             # Notify miners if challenge changed
             if self.state.last_challenge_id != challenge_id:
                 await self.miner_comms.notify_miners_challenge_active(challenge_id, challenge['github_url'])
+
+                # Download test cases for new challenge
+                logger.info(f"Downloading test cases for new challenge {challenge_id}")
+                try:
+                    test_cases_success = await self.api_client.download_test_cases(challenge_id)
+                    if test_cases_success:
+                        logger.info(f"Successfully downloaded and extracted test cases for challenge {challenge_id}")
+                    else:
+                        logger.warning(f"Failed to download test cases for challenge {challenge_id} - evaluation may use fallback")
+                except Exception as e:
+                    logger.error(f"Error downloading test cases for challenge {challenge_id}: {e}")
+                    logger.warning("Continuing without test cases - evaluation will use fallback")
 
                 # Store challenge expiration time for winner reward calculations
                 if 'expires_at' in challenge:
