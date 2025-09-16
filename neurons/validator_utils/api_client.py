@@ -769,7 +769,7 @@ class APIClient:
     def check_testcase_files_exist(self, challenge_id: str) -> bool:
         """Check if all required test case files exist for a challenge"""
         try:
-            testcases_dir = self.base_dir / 'testcases' / challenge_id
+            testcases_dir = self.base_dir / 'testcases' / challenge_id / f'{challenge_id}_testcases'
             
             expected_files = [
                 f"{challenge_id}_evaluator.py",
