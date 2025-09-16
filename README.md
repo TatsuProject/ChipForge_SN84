@@ -64,6 +64,33 @@ Set parameters in .env file and run:
 ./start_miner
 ```
 
+#### Running with nohup (background process)
+
+To run miner/validator through nohup (no hang up, an alternative of pm2):
+```bash
+nohup ./start_miner.sh > miner.log 2>&1 &
+```
+
+To show logs in real-time:
+```bash
+tail -f miner.log
+```
+
+To terminate the process:
+```bash
+# Find the process ID:
+ps aux | grep miner
+
+# Kill by PID:
+kill <PID>
+
+# Or kill by process name:
+pkill -f "miner.py"
+
+# Force kill if needed:
+kill -9 <PID>
+```
+
 #### Miner Responsibilities
 
 - Download challenge
@@ -101,6 +128,33 @@ https://github.com/TatsuProject/chipforge_eda_server
 Set parameters in .env file and run:
 ```bash
 ./start_validator
+```
+
+#### Running with nohup (background process)
+
+To run validator through nohup (no hang up, an alternative of pm2):
+```bash
+nohup ./start_validator.sh > validator.log 2>&1 &
+```
+
+To show logs in real-time:
+```bash
+tail -f validator.log
+```
+
+To terminate the process:
+```bash
+# Find the process ID:
+ps aux | grep validator
+
+# Kill by PID:
+kill <PID>
+
+# Or kill by process name:
+pkill -f "validator.py"
+
+# Force kill if needed:
+kill -9 <PID>
 ```
 
 #### Validator Responsibilities
