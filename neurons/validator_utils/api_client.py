@@ -767,25 +767,25 @@ class APIClient:
         return evaluator_py_path, evaluator_zip_path, top_module
 
     def check_testcase_files_exist(self, challenge_id: str) -> bool:
-    """Check if all required test case files exist for a challenge"""
-    try:
-        testcases_dir = self.base_dir / 'testcases' / challenge_id
-        
-        expected_files = [
-            f"{challenge_id}_evaluator.py",
-            f"{challenge_id}_evaluator.zip", 
-            f"{challenge_id}_evaluator.txt"
-        ]
-        
-        for expected_file in expected_files:
-            file_path = testcases_dir / expected_file
-            if not file_path.exists():
-                logger.warning(f"Missing test case file: {file_path}")
-                return False
-        
-        logger.debug(f"All test case files exist for challenge {challenge_id}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error checking test case files for {challenge_id}: {e}")
-        return False
+        """Check if all required test case files exist for a challenge"""
+        try:
+            testcases_dir = self.base_dir / 'testcases' / challenge_id
+            
+            expected_files = [
+                f"{challenge_id}_evaluator.py",
+                f"{challenge_id}_evaluator.zip", 
+                f"{challenge_id}_evaluator.txt"
+            ]
+            
+            for expected_file in expected_files:
+                file_path = testcases_dir / expected_file
+                if not file_path.exists():
+                    logger.warning(f"Missing test case file: {file_path}")
+                    return False
+            
+            logger.debug(f"All test case files exist for challenge {challenge_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking test case files for {challenge_id}: {e}")
+            return False
