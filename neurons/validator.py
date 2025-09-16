@@ -319,15 +319,28 @@ class ChipForgeValidator:
                         logger.info("No current challenge winner - burning emissions")
                         self.weight_manager.set_burn_weights()
                 return
-            
+
             batch_id = batch['batch_id']
             logger.info(f"Processing batch {batch_id} with {len(batch.get('submissions', []))} submissions")
-            
+
             # Check if we've already processed this batch
             if batch_id in self.state.evaluated_batches:
                 logger.info(f"Batch {batch_id} already processed")
                 return
-            
+
+            # ENHANCED: Check if test cases exist before processing batch
+            if not self.api_client.check_testcase_files_exist(challenge_id):
+                logger.info(f"Test case files missing for challenge {challenge_id}, downloading...")
+                try:
+                    test_cases_success = await self.api_client.download_test_cases(challenge_id)
+                    if test_cases_success:
+                        logger.info(f"Successfully downloaded test cases for challenge {challenge_id}")
+                    else:
+                        logger.warning(f"Failed to download test cases for challenge {challenge_id} - evaluation may use fallback")
+                except Exception as e:
+                    logger.error(f"Error downloading test cases for challenge {challenge_id}: {e}")
+                    logger.warning("Continuing without test cases - evaluation will use fallback")
+
             # Process the batch
             logger.info(f"Starting to process batch {batch_id}")
             try:
