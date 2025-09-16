@@ -150,6 +150,8 @@ class APIClient:
                     if batch.get('batch_id'):
                         logger.info(f"Found current batch: {batch['batch_id']} with {batch.get('available_submissions', 0)} submissions")
                         return batch
+                    else:
+                        logger.info(f"{batch}")
                 else:
                     logger.debug(f"No current batch: {response.status}")
                 return None
@@ -576,13 +578,13 @@ class APIClient:
         for submission_id in submissions.keys():
             import random
             evaluations[submission_id] = {
-                'overall_score': random.uniform(60, 95),
-                'functionality_score': random.uniform(70, 100),
-                'area_score': random.uniform(50, 90),
-                'delay_score': random.uniform(60, 95),
-                'power_score': random.uniform(55, 88),
+                'overall_score': 0.0,
+                'functionality_score': 0.0,
+                'area_score': 0.0,
+                'delay_score': 0.0,
+                'power_score': 0.0,
                 'passed_testbench': random.choice([True, True, True, False]),
-                'evaluation_notes': f"Dummy evaluation for {submission_id}"
+                'evaluation_notes': f"ERROR! Dummy evaluation for {submission_id}, There is an error in evaluation pipeline"
             }
         
         await asyncio.sleep(2)  # Simulate processing time
@@ -748,9 +750,9 @@ class APIClient:
         """Get test case files for a challenge"""
         testcases_dir = self.base_dir / 'testcases' / challenge_id
         
-        evaluator_py_path = testcases_dir / f"{challenge_id}_evaluator.py"
-        evaluator_zip_path = testcases_dir / f"{challenge_id}_evaluator.zip"
-        evaluator_txt_path = testcases_dir / f"{challenge_id}_evaluator.txt"
+        evaluator_py_path = testcases_dir / f"{challenge_id}_testcases" / f"{challenge_id}_evaluator.py"
+        evaluator_zip_path = testcases_dir / f"{challenge_id}_testcases" / f"{challenge_id}_evaluator.zip"
+        evaluator_txt_path = testcases_dir / f"{challenge_id}_testcases" / f"{challenge_id}_evaluator.txt"
         
         # Read top_module from txt file
         top_module = ""
