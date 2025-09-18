@@ -38,34 +38,11 @@ class APIClient:
         
         # Validator authentication
         self.validator_hotkey = self.wallet.hotkey.ss58_address
-        self.private_key = self._load_private_key()
         
         # Directories
         self.base_dir = Path('./validator_data')
         self.submissions_dir = self.base_dir / 'submissions'
         self.submissions_dir.mkdir(parents=True, exist_ok=True)
-    
-    def _load_private_key(self) -> ed25519.Ed25519PrivateKey:
-        """Load Ed25519 private key from wallet"""
-        try:
-            # Get private key as bytes array/list from bittensor wallet
-            private_key_data = self.wallet.hotkey.private_key
-            
-            # Convert list to bytes if needed
-            if isinstance(private_key_data, list):
-                private_key_bytes = bytes(private_key_data)
-            else:
-                private_key_bytes = private_key_data
-            
-            # Take only first 32 bytes for Ed25519 (in case it's expanded form)
-            if len(private_key_bytes) > 32:
-                private_key_bytes = private_key_bytes[:32]
-            
-            return ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
-            
-        except Exception as e:
-            logger.error(f"Error loading private key: {e}")
-            raise
     
     def create_signature(self, message: str) -> str:
         """Create signature using Bittensor's native signing method"""
