@@ -180,6 +180,48 @@ class ChipForgeValidator:
         except Exception as e:
             logger.error(f"Error during enhanced crash recovery: {e}")
             logger.error(traceback.format_exc())
+
+    async def check_challenge_expiration_update(self, challenge_id: str):
+        """Check if challenge expiration time has been updated by admin"""
+        try:
+            # Get current challenge info from API
+            challenge = await self.api_client.get_active_challenge()
+            
+            if not challenge or challenge['challenge_id'] != challenge_id:
+                return  # Challenge no longer active or different challenge
+            
+            if 'expires_at' not in challenge:
+                return  # No expiration time in response
+            
+            # Parse new expiration time
+            new_expires_at = datetime.fromisoformat(challenge['expires_at'].replace('Z', '+00:00'))
+            
+            # Check if we have a stored expiration time and compare
+            if hasattr(self.state, 'current_challenge_expires_at') and self.state.current_challenge_expires_at:
+                stored_expires_at = self.state.current_challenge_expires_at
+                
+                # Check if expiration time has changed
+                if new_expires_at != stored_expires_at:
+                    time_diff = new_expires_at - stored_expires_at
+                    hours_diff = time_diff.total_seconds() / 3600
+                    
+                    if hours_diff > 0:
+                        logger.info(f"Challenge {challenge_id} deadline extended by {hours_diff:.2f} hours")
+                        logger.info(f"Old expiration: {stored_expires_at}")
+                        logger.info(f"New expiration: {new_expires_at}")
+                    else:
+                        logger.info(f"Challenge {challenge_id} deadline shortened by {abs(hours_diff):.2f} hours")
+                    
+                    # Update stored expiration time
+                    self.state.current_challenge_expires_at = new_expires_at
+                    self.state.save_state()
+                    
+                    logger.info(f"Updated challenge {challenge_id} expiration time in validator state")
+            
+        except Exception as e:
+            logger.error(f"Error checking challenge expiration update: {e}")
+            # Don't raise exception - this is a non-critical update check
+
     
     async def run_evaluation_cycle(self):
         """Main evaluation cycle with dynamic scheduling"""
@@ -256,6 +298,18 @@ class ChipForgeValidator:
                 return
             
             challenge_id = challenge['challenge_id']
+
+            # ENHANCED: Check for expiration time updates periodically (every 1 minute)
+            if not hasattr(self, '_last_expiration_check'):
+                self._last_expiration_check = {}
+
+            current_time = datetime.now(timezone.utc)
+            last_check = self._last_expiration_check.get(challenge_id, datetime.min.replace(tzinfo=timezone.utc))
+
+            # Check expiration update every 1 minute
+            if (current_time - last_check).total_seconds() > 60:  # 1 minute
+                await self.check_challenge_expiration_update(challenge_id)
+                self._last_expiration_check[challenge_id] = current_time
             
             # Notify miners if challenge changed
             if self.state.last_challenge_id != challenge_id:
