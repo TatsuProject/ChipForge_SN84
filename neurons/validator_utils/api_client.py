@@ -410,25 +410,14 @@ class APIClient:
             return await self._dummy_evaluate_submissions(submissions)
         
         # Get test case files
-        evaluator_py_path, evaluator_zip_path, top_module = self.get_testcase_files(challenge_id)
-        
-        # Verify test case files exist
-        if not evaluator_py_path.exists():
-            logger.error(f"Evaluator Python file not found: {evaluator_py_path}")
-            return await self._dummy_evaluate_submissions(submissions)
+        evaluator_zip_path = self.get_testcase_files(challenge_id)
             
         if not evaluator_zip_path.exists():
             logger.error(f"Evaluator zip file not found: {evaluator_zip_path}")
             return await self._dummy_evaluate_submissions(submissions)
-            
-        if not top_module:
-            logger.error("Top module not found or empty")
-            return await self._dummy_evaluate_submissions(submissions)
         
         logger.info(f"Using test case files:")
-        logger.info(f"  Evaluator Python: {evaluator_py_path}")
-        logger.info(f"  Evaluator Zip: {evaluator_zip_path}")
-        logger.info(f"  Top Module: {top_module}")
+        logger.info(f" Validator's testcases Zip: {evaluator_zip_path}")
         
         evaluations = {}
         
@@ -454,35 +443,20 @@ class APIClient:
                                               filename=f'{submission_id}.zip',
                                               content_type='application/zip')
                         
-                        # Add evaluator Python file
-                        with open(evaluator_py_path, 'rb') as evaluator_py_file:
-                            form_data.add_field('evaluator_py', evaluator_py_file.read(),
-                                              filename=f'{challenge_id}_evaluator.py',
-                                              content_type='application/x-python')
-                        
                         # Add evaluator zip file
                         with open(evaluator_zip_path, 'rb') as evaluator_zip_file:
                             form_data.add_field('evaluator_zip', evaluator_zip_file.read(),
-                                              filename=f'{challenge_id}_evaluator.zip',
+                                              filename=f'{challenge_id}_validator.zip',
                                               content_type='application/zip')
-                        
-                        # Add top_module as form field
-                        form_data.add_field('top_module', top_module)
-                        
-                        # Headers
-                        headers = {'Authorization': f'Bearer {self.eda_api_key}'}
                         
                         logger.info(f"Sending evaluation request for {submission_id}:")
                         logger.info(f"  Design zip size: {len(submission_data)} bytes")
-                        logger.info(f"  Evaluator py size: {evaluator_py_path.stat().st_size} bytes")
-                        logger.info(f"  Evaluator zip size: {evaluator_zip_path.stat().st_size} bytes")
-                        logger.info(f"  Top module: {top_module}")
+                        logger.info(f"  Validaotr's testcases zip size: {evaluator_zip_path.stat().st_size} bytes")
                         
                         try:
                             async with session.post(
                                 f"{self.eda_server_url}/evaluate",
                                 data=form_data,
-                                headers=headers
                             ) as response:
                                 logger.info(f"EDA server response status for {submission_id}: {response.status}")
                                 
@@ -679,36 +653,9 @@ class APIClient:
                     testcases_dir.mkdir(exist_ok=True)
                     
                     # Save the zip file
-                    zip_path = testcases_dir / f"{challenge_id}_testcases.zip"
+                    zip_path = testcases_dir / f"{challenge_id}_validator.zip"
                     async with aiofiles.open(zip_path, 'wb') as f:
                         await f.write(content)
-                    
-                    # Extract the zip file
-                    
-                    challenge_testcases_dir = testcases_dir / challenge_id
-                    challenge_testcases_dir.mkdir(exist_ok=True)
-                    
-                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                        zip_ref.extractall(challenge_testcases_dir)
-                    
-                    logger.info(f"Test cases extracted to: {challenge_testcases_dir}")
-                    
-                    # Verify expected files exist
-                    expected_files = [
-                        f"{challenge_id}_evaluator.py",
-                        f"{challenge_id}_evaluator.zip", 
-                        f"{challenge_id}_evaluator.txt"
-                    ]
-                    
-                    missing_files = []
-                    for expected_file in expected_files:
-                        if not (challenge_testcases_dir / expected_file).exists():
-                            missing_files.append(expected_file)
-                    
-                    if missing_files:
-                        logger.warning(f"Some expected files missing: {missing_files}")
-                    else:
-                        logger.info("All expected test case files found")
                     
                     return True
                     
@@ -725,42 +672,17 @@ class APIClient:
     
     def get_testcase_files(self, challenge_id: str) -> tuple:
         """Get test case files for a challenge"""
-        testcases_dir = self.base_dir / 'testcases' / challenge_id
-        
-        evaluator_py_path = testcases_dir / f"{challenge_id}_testcases" / f"{challenge_id}_evaluator.py"
-        evaluator_zip_path = testcases_dir / f"{challenge_id}_testcases" / f"{challenge_id}_evaluator.zip"
-        evaluator_txt_path = testcases_dir / f"{challenge_id}_testcases" / f"{challenge_id}_evaluator.txt"
-        
-        # Read top_module from txt file
-        top_module = ""
-        if evaluator_txt_path.exists():
-            try:
-                with open(evaluator_txt_path, 'r') as f:
-                    top_module = f.read().strip()
-                logger.info(f"Loaded top_module from {challenge_id}_evaluator.txt: {top_module}")
-            except Exception as e:
-                logger.error(f"Error reading top_module from txt file: {e}")
-        else:
-            logger.warning(f"Top module file not found: {evaluator_txt_path}")
-        
-        return evaluator_py_path, evaluator_zip_path, top_module
+        evaluator_zip_path = self.base_dir / 'testcases' / f"{challenge_id}_validator.zip"
+        return evaluator_zip_path
 
     def check_testcase_files_exist(self, challenge_id: str) -> bool:
         """Check if all required test case files exist for a challenge"""
         try:
-            testcases_dir = self.base_dir / 'testcases' / challenge_id / f'{challenge_id}_testcases'
+            evaluator_zip_path = self.base_dir / 'testcases' / f"{challenge_id}_validator.zip"
             
-            expected_files = [
-                f"{challenge_id}_evaluator.py",
-                f"{challenge_id}_evaluator.zip", 
-                f"{challenge_id}_evaluator.txt"
-            ]
-            
-            for expected_file in expected_files:
-                file_path = testcases_dir / expected_file
-                if not file_path.exists():
-                    logger.warning(f"Missing test case file: {file_path}")
-                    return False
+            if not evaluator_zip_path.exists():
+                logger.warning(f"Missing test case file: {file_path}")
+                return False
             
             logger.debug(f"All test case files exist for challenge {challenge_id}")
             return True
