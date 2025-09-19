@@ -496,15 +496,29 @@ class APIClient:
 
     def _transform_eda_response(self, eda_result: Dict, submission_id: str) -> Dict:
         """Transform EDA server response to expected format"""
-        # Adjust this based on your actual EDA server response format
+        # Extract the final score from the new response format
+        final_score = eda_result.get('final_score', {})
+        
+        # Extract functionality score from verilator results
+        verilator_results = eda_result.get('verilator_results', {})
+        verilator_success = verilator_results.get('success', False)
+        functionality_score = 0.0
+        
+        if verilator_success:
+            verilator_inner_results = verilator_results.get('results', {})
+            functionality_score = verilator_inner_results.get('functionality_score', 0.0)
+        
+        # Check if the submission passed the testbench (based on functional gate)
+        passed_testbench = final_score.get('functional_gate', False) and functionality_score > 0
+        
         return {
-            'overall_score': eda_result.get('overall_score', 0),
-            'functionality_score': eda_result.get('functionality_score', 0),
-            'area_score': eda_result.get('area_score', 0),
-            'delay_score': eda_result.get('delay_score', 0),
-            'power_score': eda_result.get('power_score', 0),
-            'passed_testbench': eda_result.get('passed_testbench', False),
-            'evaluation_notes': eda_result.get('evaluation_notes', f"EDA evaluation for {submission_id}")
+            'overall_score': final_score.get('overall', 0.0),
+            'functionality_score': final_score.get('func_score', 0.0),
+            'area_score': final_score.get('area_score', 0.0),
+            'delay_score': final_score.get('perf_score', 0.0),  # Using perf_score as delay_score
+            'power_score': 0.0,  # Power score not provided in new format
+            'passed_testbench': passed_testbench,
+            'evaluation_notes': f"EDA evaluation for {submission_id} - Functionality: {functionality_score:.2f}, Overall: {final_score.get('overall', 0.0):.2f}"
         }
 
     def _generate_fallback_evaluation(self, submission_id: str) -> Dict:
