@@ -9,7 +9,8 @@ import os
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
-
+from dotenv import load_dotenv
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 

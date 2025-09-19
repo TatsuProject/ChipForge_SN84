@@ -273,25 +273,20 @@ class ChipForgeValidator:
                         logger.info("No active challenge, no submissions found - burning emissions")
                     self.weight_manager.set_burn_weights()
                 else:
-                    # Check if we have a current challenge winner who should still get rewards
-                    if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
-                        current_winner_hotkey = self.state.current_challenge_best[0]
-                        reward_hotkey = self.emission_manager.get_reward_hotkey(current_winner_hotkey)
-                        
-                        if reward_hotkey:
-                            uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
-                            if uid is not None:
-                                weights = {reward_hotkey: 1.0}
-                                logger.info(f"No active challenge, but rewarding current best miner {reward_hotkey[:12]}...")
-                                self.weight_manager.set_weights(weights)
-                            else:
-                                logger.info("No active challenge, current winner not on subnet - burning emissions")
-                                self.weight_manager.set_burn_weights()
+                    # Check emission manager for active winner reward period
+                    reward_hotkey = self.emission_manager.get_reward_hotkey()
+                    
+                    if reward_hotkey:
+                        uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
+                        if uid is not None:
+                            weights = {reward_hotkey: 1.0}
+                            logger.info(f"No active challenge, but rewarding winner {reward_hotkey[:12]}... (emission manager active)")
+                            self.weight_manager.set_weights(weights)
                         else:
-                            logger.info("No active challenge, current winner reward expired - burning emissions")
+                            logger.info("No active challenge, winner not on subnet - burning emissions")
                             self.weight_manager.set_burn_weights()
                     else:
-                        logger.info("No active challenge, no current winner - burning emissions")
+                        logger.info("No active challenge, no winner reward period - burning emissions")
                         self.weight_manager.set_burn_weights()
                 
                 self.next_batch_check = now + timedelta(seconds=10)

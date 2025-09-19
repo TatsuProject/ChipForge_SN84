@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from cryptography.hazmat.primitives.asymmetric import ed25519
 import zipfile
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
