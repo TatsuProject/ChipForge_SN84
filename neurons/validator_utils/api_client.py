@@ -33,7 +33,6 @@ class APIClient:
         
         # EDA Server configuration
         self.eda_server_url = os.getenv("EDA_SERVER_URL", "http://localhost:8080")
-        self.eda_api_key = os.getenv("EDA_API_KEY", "eda-auth-key")
         self.use_dummy_evaluation = os.getenv("USE_DUMMY_EVALUATION", "false").lower() == "true"
         
         # Validator authentication
