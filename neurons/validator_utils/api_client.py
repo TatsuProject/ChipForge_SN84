@@ -403,7 +403,7 @@ class APIClient:
         return submission_hotkeys
     
     async def evaluate_submissions_with_eda_server(self, challenge_id: str, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
-        """Send submissions to EDA server for evaluation with test cases"""
+        """Send submissions to EDA server for evaluation with test cases - PARALLEL VERSION"""
         logger.info(f"Evaluating {len(submissions)} submissions with EDA server using test cases")
         
         # Fallback to dummy evaluation if configured
@@ -420,78 +420,105 @@ class APIClient:
         logger.info(f"Using test case files:")
         logger.info(f" Validator's testcases Zip: {evaluator_zip_path}")
         
-        evaluations = {}
+        # Create semaphore to limit concurrent requests to EDA server
+        semaphore = asyncio.Semaphore(8)  # Limit to 8 concurrent requests
         
-        for submission_id, submission_data in submissions.items():
-            try:
-                logger.info(f"Evaluating submission {submission_id} with EDA server and test cases")
-                
-                # Create temporary files for submission and test cases
-                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as design_temp:
-                    design_temp.write(submission_data)
-                    design_temp.flush()
+        async def evaluate_single_submission(submission_id: str, submission_data: bytes) -> tuple[str, Dict]:
+            """Evaluate a single submission with semaphore control"""
+            async with semaphore:  # This limits concurrent requests
+                try:
+                    logger.info(f"Evaluating submission {submission_id} with EDA server and test cases")
                     
-                    # Create timeout for each individual submission
-                    timeout = aiohttp.ClientTimeout(total=900)  # 15 minutes per submission
-                    
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        # Prepare multipart form data
-                        form_data = aiohttp.FormData()
+                    # Create temporary files for submission
+                    with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as design_temp:
+                        design_temp.write(submission_data)
+                        design_temp.flush()
                         
-                        # Add design zip
-                        with open(design_temp.name, 'rb') as design_file:
-                            form_data.add_field('design_zip', design_file.read(), 
-                                              filename=f'{submission_id}.zip',
-                                              content_type='application/zip')
+                        # Create timeout for each individual submission
+                        timeout = aiohttp.ClientTimeout(total=900)  # 15 minutes per submission
                         
-                        # Add evaluator zip file
-                        with open(evaluator_zip_path, 'rb') as evaluator_zip_file:
-                            form_data.add_field('evaluator_zip', evaluator_zip_file.read(),
-                                              filename=f'{challenge_id}_validator.zip',
-                                              content_type='application/zip')
-                        
-                        logger.info(f"Sending evaluation request for {submission_id}:")
-                        logger.info(f"  Design zip size: {len(submission_data)} bytes")
-                        logger.info(f"  Validaotr's testcases zip size: {evaluator_zip_path.stat().st_size} bytes")
-                        
-                        try:
-                            async with session.post(
-                                f"{self.eda_server_url}/evaluate",
-                                data=form_data,
-                            ) as response:
-                                logger.info(f"EDA server response status for {submission_id}: {response.status}")
-                                
-                                if response.status == 200:
-                                    result = await response.json()
-                                    logger.info(f"Successfully evaluated {submission_id} with EDA server")
-                                    logger.info(f"EDA response: {result}")
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            # Prepare multipart form data
+                            form_data = aiohttp.FormData()
+                            
+                            # Add design zip
+                            with open(design_temp.name, 'rb') as design_file:
+                                form_data.add_field('design_zip', design_file.read(), 
+                                                filename=f'{submission_id}.zip',
+                                                content_type='application/zip')
+                            
+                            # Add evaluator zip file
+                            with open(evaluator_zip_path, 'rb') as evaluator_zip_file:
+                                form_data.add_field('evaluator_zip', evaluator_zip_file.read(),
+                                                filename=f'{challenge_id}_validator.zip',
+                                                content_type='application/zip')
+                            
+                            logger.info(f"Sending evaluation request for {submission_id}:")
+                            logger.info(f"  Design zip size: {len(submission_data)} bytes")
+                            logger.info(f"  Validator's testcases zip size: {evaluator_zip_path.stat().st_size} bytes")
+                            
+                            try:
+                                async with session.post(
+                                    f"{self.eda_server_url}/evaluate",
+                                    data=form_data,
+                                ) as response:
+                                    logger.info(f"EDA server response status for {submission_id}: {response.status}")
                                     
-                                    # Transform EDA server response to expected format
-                                    evaluations[submission_id] = self._transform_eda_response(result, submission_id)
-                                    
-                                else:
-                                    error_text = await response.text()
-                                    logger.error(f"EDA server error for {submission_id}: {response.status} - {error_text}")
-                                    # Use fallback evaluation
-                                    evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
-                                    
-                        except asyncio.TimeoutError:
-                            logger.error(f"Timeout evaluating {submission_id} with EDA server")
-                            evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
-                        except Exception as eval_error:
-                            logger.error(f"Exception during EDA evaluation for {submission_id}: {eval_error}")
-                            evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
+                                    if response.status == 200:
+                                        result = await response.json()
+                                        logger.info(f"Successfully evaluated {submission_id} with EDA server")
+                                        logger.info(f"EDA response: {result}")
+                                        
+                                        # Transform EDA server response to expected format
+                                        evaluation_result = self._transform_eda_response(result, submission_id)
+                                        
+                                    else:
+                                        error_text = await response.text()
+                                        logger.error(f"EDA server error for {submission_id}: {response.status} - {error_text}")
+                                        # Use fallback evaluation
+                                        evaluation_result = self._generate_fallback_evaluation(submission_id)
+                                        
+                            except asyncio.TimeoutError:
+                                logger.error(f"Timeout evaluating {submission_id} with EDA server")
+                                evaluation_result = self._generate_fallback_evaluation(submission_id)
+                            except Exception as eval_error:
+                                logger.error(f"Exception during EDA evaluation for {submission_id}: {eval_error}")
+                                evaluation_result = self._generate_fallback_evaluation(submission_id)
+                        
+                        # Clean up temporary design file
+                        os.unlink(design_temp.name)
+                        
+                    return submission_id, evaluation_result
+                        
+                except Exception as e:
+                    logger.error(f"Error evaluating submission {submission_id}: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     
-                    # Clean up temporary design file
-                    os.unlink(design_temp.name)
-                    
-            except Exception as e:
-                logger.error(f"Error evaluating submission {submission_id}: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                
-                # Use fallback evaluation
-                evaluations[submission_id] = self._generate_fallback_evaluation(submission_id)
+                    # Use fallback evaluation
+                    return submission_id, self._generate_fallback_evaluation(submission_id)
+        
+        # Create tasks for all submissions to run in parallel
+        tasks = [
+            evaluate_single_submission(submission_id, submission_data)
+            for submission_id, submission_data in submissions.items()
+        ]
+        
+        logger.info(f"Starting parallel evaluation of {len(tasks)} submissions")
+        
+        # Wait for all evaluations to complete
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results and handle any exceptions
+        evaluations = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Task failed with exception: {result}")
+                # You might want to generate a fallback evaluation for failed tasks
+                continue
+            
+            submission_id, evaluation_result = result
+            evaluations[submission_id] = evaluation_result
         
         logger.info(f"EDA server evaluation completed for {len(evaluations)} submissions")
         return evaluations
