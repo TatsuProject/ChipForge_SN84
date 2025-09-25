@@ -396,7 +396,7 @@ class ChipForgeValidator:
                 # Add timeout to prevent hanging forever
                 success = await asyncio.wait_for(
                     self.batch_processor.process_batch(challenge_id, batch), 
-                    timeout=150  # 2.5 minutes timeout
+                    timeout=1500  # 25 minutes timeout
                 )
                 logger.info(f"Batch processing completed with success: {success}")
             except asyncio.TimeoutError:
