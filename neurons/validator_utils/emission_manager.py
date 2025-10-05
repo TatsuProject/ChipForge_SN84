@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# neurons/validator_utils/emission_manager.py
 """
 Emission Manager for ChipForge Validator
 Handles emission phases based on challenge lifecycle
@@ -27,6 +28,7 @@ class EmissionManager:
         self.winner_reward_start_time = None
         self.current_phase = "initial_burn"
         self.current_winner = None  # Add persistence for current winner
+        self.current_winner_score = 0.0  # ADD THIS LINE - Track winner's score
         self.last_challenge_end_time = None  # Track when last challenge ended
         
         self.load_state()
@@ -53,6 +55,7 @@ class EmissionManager:
                     self.winner_reward_start_time = data.get('winner_reward_start_time')
                     self.current_phase = data.get('current_phase', 'initial_burn')
                     self.current_winner = data.get('current_winner')  # Restore winner
+                    self.current_winner_score = data.get('current_winner_score', 0.0)  # ADD THIS LINE
                     self.last_challenge_end_time = data.get('last_challenge_end_time')  # Restore last challenge end
                     
                     # Convert ISO strings back to datetime objects
@@ -78,6 +81,7 @@ class EmissionManager:
                 'winner_reward_start_time': self.winner_reward_start_time.isoformat() if self.winner_reward_start_time else None,
                 'current_phase': self.current_phase,
                 'current_winner': self.current_winner,
+                'current_winner_score': self.current_winner_score,  # ADD THIS LINE
                 'last_challenge_end_time': self.last_challenge_end_time.isoformat() if self.last_challenge_end_time else None,
                 'updated_at': datetime.now(timezone.utc).isoformat()
             }
@@ -104,22 +108,50 @@ class EmissionManager:
         self.save_state()
         logger.info(f"First challenge completed, winner: {winner_hotkey[:12]}...")
     
-    def update_winner(self, winner_hotkey: str, challenge_active: bool = True):
-        """Update current winner and start appropriate reward period"""
-        self.current_winner = winner_hotkey
+    def update_winner(self, winner_hotkey: str, winner_score: float, winner_timestamp: Optional[datetime] = None):
+        """
+        Update current winner ONLY if it's a new winner or score improved.
         
-        if challenge_active:
-            # During active challenge - no time limit, reward until better submission
-            self.winner_reward_start_time = None  # No time limit during challenge
-            self.current_phase = "normal"  # Use normal logic during challenge
-            logger.info(f"New winner during active challenge: {winner_hotkey[:12]}... (no time limit)")
-        else:
-            # Challenge expired - start timed reward period
-            self.winner_reward_start_time = datetime.now(timezone.utc)
+        Rules:
+        1. Different hotkey → Reset timer
+        2. Same hotkey, higher score → Reset timer  
+        3. Same hotkey, same/lower score → Do nothing (keep existing timer)
+        
+        Args:
+            winner_hotkey: Hotkey of the winner
+            winner_score: Winner's score
+            winner_timestamp: When this winner was found (defaults to now)
+        """
+        if winner_timestamp is None:
+            winner_timestamp = datetime.now(timezone.utc)
+        
+        # Check if this is actually a new winner or improvement
+        is_new_winner = self.current_winner != winner_hotkey
+        is_improvement = (self.current_winner == winner_hotkey and winner_score > self.current_winner_score)
+        
+        if is_new_winner:
+            # Different hotkey - new winner
+            logger.info(f"NEW WINNER: {winner_hotkey[:12]}... (score: {winner_score}) replaces {self.current_winner[:12] if self.current_winner else 'None'}... (score: {self.current_winner_score})")
+            self.current_winner = winner_hotkey
+            self.current_winner_score = winner_score
+            self.winner_reward_start_time = winner_timestamp
             self.current_phase = "winner_reward"
-            logger.info(f"New winner after challenge expiry: {winner_hotkey[:12]}... (timed reward period)")
-        
-        self.save_state()
+            logger.info(f"Reward period starts at {winner_timestamp} for {self.total_hours_for_winner_reward}h")
+            self.save_state()
+            
+        elif is_improvement:
+            # Same winner improved their score - reset timer
+            logger.info(f"WINNER IMPROVED: {winner_hotkey[:12]}... score {self.current_winner_score} → {winner_score}")
+            self.current_winner_score = winner_score
+            self.winner_reward_start_time = winner_timestamp
+            self.current_phase = "winner_reward"
+            logger.info(f"Reward timer RESET at {winner_timestamp} for {self.total_hours_for_winner_reward}h")
+            self.save_state()
+            
+        else:
+            # Same winner, same/lower score - do nothing
+            logger.debug(f"Same winner {winner_hotkey[:12]}... with same/lower score ({winner_score} vs {self.current_winner_score}) - keeping existing timer")
+            # Don't save state - no changes made
     
     def mark_challenge_ended(self):
         """Mark that current challenge has ended"""
@@ -247,15 +279,17 @@ class EmissionManager:
                 reward_period_end = self.winner_reward_start_time + timedelta(hours=self.total_hours_for_winner_reward)
                 if now < reward_period_end:
                     remaining_hours = (reward_period_end - now).total_seconds() / 3600
-                    logger.info(f"Winner {self.current_winner[:12] if self.current_winner else 'Unknown'}... reward period active - {remaining_hours:.1f}h remaining")
-                    return False  # Don't burn during winner reward period
+                    logger.info(f"Winner {self.current_winner[:12] if self.current_winner else 'Unknown'}... (score: {self.current_winner_score}) reward period active - {remaining_hours:.1f}h remaining")
+                    return False
                 else:
-                    # Winner period ended - CLEAR THE WINNER
-                    logger.info(f"Winner reward period expired for {self.current_winner[:12] if self.current_winner else 'Unknown'}... - clearing winner")
-                    self.current_winner = None  # CLEAR WINNER
+                    # Winner period ended - ONLY clear winner, KEEP score for comparison
+                    logger.info(f"Winner reward period EXPIRED for {self.current_winner[:12] if self.current_winner else 'Unknown'}... (score: {self.current_winner_score})")
+                    old_winner = self.current_winner
+                    self.current_winner = None
+                    # DO NOT reset current_winner_score - keep it for future comparisons
                     
                     if best_miner_score > 0:
-                        logger.info("Winner period ended, new good submission found - transitioning to normal")
+                        logger.info("Winner period ended, challenge still active - transitioning to normal")
                         self.current_phase = "normal"
                         self.save_state()
                         return False
@@ -278,6 +312,9 @@ class EmissionManager:
         # Phase 4: Normal operation
         elif self.current_phase == "normal":
             if best_miner_score > 0:
+                # Log winner info if we have one
+                if self.current_winner:
+                    logger.info(f"Normal operation: Current winner {self.current_winner[:12]}... (no time limit during active challenge)")
                 logger.info("Normal operation with submissions - not burning emissions")
                 return False
             else:
@@ -287,19 +324,41 @@ class EmissionManager:
         logger.info("Unknown phase - burning emissions as fallback")
         return True
     
-    def get_reward_hotkey(self, current_best_hotkey: Optional[str] = None) -> Optional[str]:
-        """Get hotkey that should receive rewards - returns None if winner period expired"""
+    def get_reward_hotkey(self, current_best_hotkey: Optional[str] = None, current_best_score: float = 0.0) -> Optional[str]:
+        """
+        Get hotkey that should receive rewards.
+        
+        Logic:
+        - If in winner_reward phase: Return current_winner
+        - If not: Only return hotkey if score BEATS our last rewarded score
+        - Otherwise: Return None (burn)
+        """
         if self.current_phase == "winner_reward" and self.current_winner:
-            # Double-check that winner period hasn't expired
+            # Active winner reward period
             if self.winner_reward_start_time:
                 now = datetime.now(timezone.utc)
                 reward_period_end = self.winner_reward_start_time + timedelta(hours=self.total_hours_for_winner_reward)
+                
                 if now < reward_period_end:
+                    remaining = (reward_period_end - now).total_seconds() / 3600
+                    logger.info(f"Winner reward active: {self.current_winner[:12]}... ({remaining:.2f}h remaining)")
                     return self.current_winner
                 else:
-                    # Period expired, clear winner
-                    logger.info(f"Winner reward period expired - clearing winner {self.current_winner[:12]}...")
+                    # Period expired
+                    logger.info(f"Winner reward period expired in get_reward_hotkey")
                     self.current_winner = None
                     self.save_state()
                     return None
-        return current_best_hotkey
+        
+        # No active winner_reward phase
+        # Only reward if new submission BEATS the last rewarded score
+        if current_best_hotkey and current_best_score > self.current_winner_score:
+            logger.info(f"New best found: {current_best_hotkey[:12]}... (score: {current_best_score}) beats last rewarded (score: {self.current_winner_score})")
+            return current_best_hotkey
+        else:
+            # Same or worse than what we already rewarded
+            if current_best_hotkey and current_best_score == self.current_winner_score:
+                logger.debug(f"Same winner {current_best_hotkey[:12]}... (score: {current_best_score}) - already rewarded, now burning")
+            elif current_best_hotkey:
+                logger.debug(f"Hotkey {current_best_hotkey[:12]}... (score: {current_best_score}) worse than last rewarded ({self.current_winner_score}) - burning")
+            return None

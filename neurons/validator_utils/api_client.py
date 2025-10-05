@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# neurons/validator_utils/api_client.py
 """
 API Client for ChipForge Validator
 Handles all API communications with challenge server and EDA server
@@ -44,6 +45,15 @@ class APIClient:
         self.base_dir = Path('./validator_data')
         self.submissions_dir = self.base_dir / 'submissions'
         self.submissions_dir.mkdir(parents=True, exist_ok=True)
+
+    async def check_server_connectivity(self) -> bool:
+        """Check if challenge server is reachable"""
+        try:
+            url = f"{self.api_url}/api/v1/health"
+            async with self.session.get(url, timeout=5) as response:
+                return response.status in [200, 404]  # 404 is ok, means server is up
+        except Exception:
+            return False
     
     def create_signature(self, message: str) -> str:
         """Create signature using Bittensor's native signing method"""
@@ -63,19 +73,17 @@ class APIClient:
             raise
     
     async def get_active_challenge(self) -> Optional[Dict]:
-        """Get active challenge from server"""
+        """Get active challenge from server with connection error handling"""
         try:
             url = f"{self.api_url}/api/v1/challenges/active"
-            async with self.session.get(url) as response:
+            async with self.session.get(url, timeout=10) as response:
                 if response.status == 200:
                     challenge = await response.json()
                     
-                    # Check if response is null/None
                     if challenge is None:
-                        logger.info("Currently, no challenge is active!")
+                        logger.info("Server accessible: No active challenge")
                         return None
                     
-                    # Check if challenge has required fields
                     if not isinstance(challenge, dict) or 'challenge_id' not in challenge:
                         logger.warning("Invalid challenge response format")
                         return None
@@ -85,9 +93,16 @@ class APIClient:
                 else:
                     logger.debug(f"No active challenge found: {response.status}")
                     return None
+                    
+        except asyncio.TimeoutError:
+            logger.error("Timeout connecting to challenge server")
+            raise ConnectionError("Challenge server timeout")
+        except aiohttp.ClientError as e:
+            logger.error(f"Connection error: {e}")
+            raise ConnectionError(f"Challenge server unreachable: {e}")
         except Exception as e:
-            logger.error(f"Error getting active challenge: {e}")
-            return None
+            logger.error(f"Unexpected error getting challenge: {e}")
+            raise
 
     async def get_challenge_remaining_time(self, challenge_id: str) -> Optional[float]:
         """Get remaining time for challenge in seconds"""

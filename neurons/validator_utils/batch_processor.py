@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# neurons/validator_utils/batch_processor.py
 """
 Batch Processor for ChipForge Validator
 Handles batch evaluation and processing logic
@@ -158,7 +159,7 @@ class BatchProcessor:
                 self.state.current_challenge_best = (new_champion, new_best_score)
                 
                 # Update emission manager with new winner
-                self.emission_manager.update_winner(new_champion, challenge_active=True)
+                self.emission_manager.update_winner(new_champion, new_best_score, winner_timestamp=None)
                 
                 # Check if new champion is on subnet and get UID
                 try:

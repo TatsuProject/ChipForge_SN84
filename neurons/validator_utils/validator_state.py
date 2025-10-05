@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# neurons/validator_utils/validator_state.py
 """
 Validator State Management for ChipForge Validator
 Manages validator state and persistence
@@ -28,6 +29,7 @@ class ValidatorState:
         self.expired_challenges: List[str] = []
         self.current_challenge_best: Tuple[Optional[str], float] = (None, 0.0)  # Current challenge only
         self.current_challenge_expires_at: Optional[datetime] = None
+        self.current_challenge_best_timestamp: Optional[datetime] = None  # When current best was found
         
         self.load_state()
     
@@ -51,6 +53,10 @@ class ValidatorState:
                     self.current_challenge_expires_at = data.get('current_challenge_expires_at', None)
                     if self.current_challenge_expires_at:
                         self.current_challenge_expires_at = datetime.fromisoformat(self.current_challenge_expires_at)
+
+                    self.current_challenge_best_timestamp = data.get('current_challenge_best_timestamp', None)
+                    if self.current_challenge_best_timestamp:
+                        self.current_challenge_best_timestamp = datetime.fromisoformat(self.current_challenge_best_timestamp)
                     
                 logger.info(f"Loaded validator state: batch={self.current_batch_id}, challenge={self.last_challenge_id}")
                     
@@ -70,6 +76,7 @@ class ValidatorState:
                 'expired_challenges': self.expired_challenges,
                 'current_challenge_best': list(self.current_challenge_best),
                 'current_challenge_expires_at': self.current_challenge_expires_at.isoformat() if self.current_challenge_expires_at else None,
+                'current_challenge_best_timestamp': self.current_challenge_best_timestamp.isoformat() if self.current_challenge_best_timestamp else None,
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }
             with open(self.state_file, 'w') as f:
@@ -78,15 +85,17 @@ class ValidatorState:
             logger.error(f"Error saving validator state: {e}")
     
     def update_best_miner(self, challenge_id: str, hotkey: str, score: float):
-        """Update best miner for challenge and current challenge"""
+        """Update best miner for challenge and current challenge with timestamp"""
+        
         # Update challenge-specific best
         if challenge_id not in self.challenge_best_miners or score > self.challenge_best_miners[challenge_id][1]:
             self.challenge_best_miners[challenge_id] = (hotkey, score)
             logger.info(f"New best miner for {challenge_id}: {hotkey[:12]}... (score: {score})")
         
-        # Update current challenge best (remove overall_best_miner tracking)
+        # Update current challenge best with timestamp
         if score > self.current_challenge_best[1]:
             self.current_challenge_best = (hotkey, score)
-            logger.info(f"New current challenge best: {hotkey[:12]}... (score: {score})")
+            self.current_challenge_best_timestamp = datetime.now(timezone.utc)  # NEW: Track when winner found
+            logger.info(f"New current challenge best: {hotkey[:12]}... (score: {score}) at {self.current_challenge_best_timestamp}")
         
         self.save_state()
