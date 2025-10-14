@@ -73,26 +73,40 @@ class APIClient:
             raise
     
     async def get_active_challenge(self) -> Optional[Dict]:
-        """Get active challenge from server with connection error handling"""
+        """
+        Get active challenge from server with connection error handling
+        
+        Returns:
+            Dict: Challenge data if active challenge exists
+            {"status": "no_active_challenge"}: Server accessible but no challenge (intentional)
+            None: Only on connection errors (will raise ConnectionError instead)
+        """
         try:
             url = f"{self.api_url}/api/v1/challenges/active"
             async with self.session.get(url, timeout=10) as response:
                 if response.status == 200:
                     challenge = await response.json()
                     
-                    if challenge is None:
-                        logger.info("Server accessible: No active challenge")
-                        return None
+                    # Handle new response format - server intentionally says no challenge
+                    if isinstance(challenge, dict) and challenge.get('status') == 'no_active_challenge':
+                        logger.info("Server accessible: No active challenge (server response)")
+                        return {"status": "no_active_challenge"}  # Return the dict, don't convert to None
                     
+                    # Old format - null response
+                    if challenge is None:
+                        logger.info("Server accessible: No active challenge (null response)")
+                        return {"status": "None"}  # Convert to standard format
+                    
+                    # Validate challenge structure
                     if not isinstance(challenge, dict) or 'challenge_id' not in challenge:
-                        logger.warning("Invalid challenge response format")
-                        return None
+                        logger.warning(f"Invalid challenge response format: {challenge}")
+                        return {"status": "None"}  # Treat invalid as no challenge
                     
                     logger.info(f"Active challenge: {challenge['challenge_id']}")
                     return challenge
                 else:
-                    logger.debug(f"No active challenge found: {response.status}")
-                    return None
+                    logger.debug(f"No active challenge found: HTTP {response.status}")
+                    return {"status": "None"}
                     
         except asyncio.TimeoutError:
             logger.error("Timeout connecting to challenge server")
