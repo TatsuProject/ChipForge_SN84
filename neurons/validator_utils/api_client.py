@@ -481,6 +481,9 @@ class APIClient:
                                 form_data.add_field('evaluator_zip', evaluator_zip_file.read(),
                                                 filename=f'{challenge_id}_validator.zip',
                                                 content_type='application/zip')
+
+                            # Add submission_id as form field
+                            form_data.add_field('submission_id', submission_id)
                             
                             logger.info(f"Sending evaluation request for {submission_id}:")
                             logger.info(f"  Design zip size: {len(submission_data)} bytes")
