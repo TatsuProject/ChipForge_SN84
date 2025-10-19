@@ -9,6 +9,7 @@ from .batch_processor import BatchProcessor
 from .weight_manager import WeightManager
 from .api_client import APIClient
 from .miner_comms import MinerCommunications
+from .logging_config import setup_validator_logging
 
 __all__ = [
     'EmissionManager',
@@ -16,5 +17,6 @@ __all__ = [
     'BatchProcessor',
     'WeightManager',
     'APIClient',
-    'MinerCommunications'
+    'MinerCommunications',
+    'setup_validator_logging'
 ]

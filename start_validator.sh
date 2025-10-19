@@ -3,6 +3,9 @@
 
 source .env
 
+# Create logs directory if it doesn't exist
+mkdir -p logs
+
 python neurons/validator.py \
     --netuid $NETUID \
     --subtensor.network $SUBTENSOR_NETWORK \

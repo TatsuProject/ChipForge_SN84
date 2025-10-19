@@ -10,20 +10,6 @@ from chipforge.protocol import SimpleMessage
 import asyncio
 import aiohttp
 import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Suppress third-party debug logs
-logging.getLogger('async_substrate_interface').setLevel(logging.WARNING)
-logging.getLogger('websockets').setLevel(logging.WARNING)
-logging.getLogger('substrate_interface').setLevel(logging.WARNING)
-logging.getLogger('scalecodec').setLevel(logging.WARNING)
-logging.getLogger('bittensor').setLevel(logging.INFO)  # Keep bittensor at INFO
-logging.getLogger('urllib3').setLevel(logging.WARNING)
-logging.getLogger('aiohttp').setLevel(logging.WARNING)
-
 import traceback
 import argparse
 from datetime import datetime, timezone, timedelta
@@ -36,8 +22,13 @@ from validator_utils import (
     BatchProcessor,
     WeightManager,
     APIClient,
-    MinerCommunications
+    MinerCommunications,
+    setup_validator_logging
 )
+
+# Configure logging with daily rotation
+setup_validator_logging(log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 class ChipForgeValidator:
