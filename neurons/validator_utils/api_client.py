@@ -464,7 +464,7 @@ class APIClient:
                         design_temp.flush()
                         
                         # Create timeout for each individual submission
-                        timeout = aiohttp.ClientTimeout(total=900)  # 15 minutes per submission
+                        timeout = aiohttp.ClientTimeout(total=2700)  # 45 minutes per submission
                         
                         async with aiohttp.ClientSession(timeout=timeout) as session:
                             # Prepare multipart form data
