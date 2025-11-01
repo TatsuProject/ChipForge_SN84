@@ -77,7 +77,7 @@ class APIClient:
         Get active challenge from server with connection error handling
         
         Returns:
-            Dict: Challenge data if active challenge exists
+            Dict: Challenge data if active challenge exists (includes winner_reward_hours)
             {"status": "no_active_challenge"}: Server accessible but no challenge (intentional)
             None: Only on connection errors (will raise ConnectionError instead)
         """
@@ -90,19 +90,24 @@ class APIClient:
                     # Handle new response format - server intentionally says no challenge
                     if isinstance(challenge, dict) and challenge.get('status') == 'no_active_challenge':
                         logger.info("Server accessible: No active challenge (server response)")
-                        return {"status": "no_active_challenge"}  # Return the dict, don't convert to None
+                        return {"status": "no_active_challenge"}
                     
                     # Old format - null response
                     if challenge is None:
                         logger.info("Server accessible: No active challenge (null response)")
-                        return {"status": "None"}  # Convert to standard format
+                        return {"status": "None"}
                     
                     # Validate challenge structure
                     if not isinstance(challenge, dict) or 'challenge_id' not in challenge:
                         logger.warning(f"Invalid challenge response format: {challenge}")
-                        return {"status": "None"}  # Treat invalid as no challenge
+                        return {"status": "None"}
                     
-                    logger.info(f"Active challenge: {challenge['challenge_id']}")
+                    # Extract winner_reward_hours if present
+                    if 'winner_reward_hours' in challenge:
+                        logger.info(f"Active challenge: {challenge['challenge_id']} (winner_reward_hours: {challenge['winner_reward_hours']}h)")
+                    else:
+                        logger.warning(f"Active challenge {challenge['challenge_id']} missing winner_reward_hours - will use local fallback")
+                    
                     return challenge
                 else:
                     logger.debug(f"No active challenge found: HTTP {response.status}")
@@ -583,9 +588,8 @@ class APIClient:
         }
 
     def _generate_fallback_evaluation(self, submission_id: str) -> Dict:
-        """Generate fallback evaluation when EDA server fails"""
-        import random
-        logger.warning(f"Using fallback evaluation for {submission_id}")
+        """Generate fallback evaluation when EDA server fails - marks as FAILED"""
+        logger.warning(f"Marking evaluation as FAILED for {submission_id}")
         
         return {
             'overall_score': 0.0,
@@ -594,7 +598,7 @@ class APIClient:
             'delay_score': 0.0,
             'power_score': 0.0,
             'passed_testbench': False,
-            'evaluation_notes': f"Fallback evaluation for {submission_id} (EDA server unavailable)"
+            'evaluation_notes': f"Evaluation FAILED for {submission_id} - EDA server unavailable or error occurred"
         }
 
     async def _dummy_evaluate_submissions(self, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
@@ -608,8 +612,8 @@ class APIClient:
                 'area_score': 0.0,
                 'delay_score': 0.0,
                 'power_score': 0.0,
-                'passed_testbench': random.choice([True, True, True, False]),
-                'evaluation_notes': f"ERROR! Dummy evaluation for {submission_id}, There is an error in evaluation pipeline"
+                'passed_testbench': False,
+                'evaluation_notes': f"FAILED! Dummy evaluation for {submission_id}, There is an error in evaluation pipeline"
             }
         
         await asyncio.sleep(2)  # Simulate processing time
@@ -640,8 +644,14 @@ class APIClient:
         return results
     
     async def submit_evaluation(self, challenge_id: str, submission_id: str, evaluation: Dict) -> bool:
-        """Submit evaluation for a single submission using form data"""
+        """Submit evaluation for a single submission using form data - skip if evaluation failed"""
         try:
+            # Check if evaluation failed - if so, skip submission
+            if evaluation['overall_score'] == 'failed':
+                logger.warning(f"Skipping submission of failed evaluation for {submission_id}")
+                logger.info(f"Evaluation failed for {submission_id}, validator can retry this submission in next batch")
+                return False  # Return False but don't treat as error
+            
             url = f"{self.api_url}/api/v1/challenges/{challenge_id}/submissions/{submission_id}/submit_score"
             
             # Create signature for authentication

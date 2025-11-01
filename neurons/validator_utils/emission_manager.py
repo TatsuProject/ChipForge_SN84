@@ -35,14 +35,45 @@ class EmissionManager:
     
     def load_config(self):
         """Load timing configuration from env or defaults"""
-        self.total_hours_for_winner_reward = float(os.getenv('TOTAL_HOURS_FOR_WINNER_REWARD', '0.1'))
+        # Load local fallback value
+        self.local_winner_reward_hours = float(os.getenv('TOTAL_HOURS_FOR_WINNER_REWARD', '0.5'))
+        
+        # Active value (can be updated from challenge server)
+        self.total_hours_for_winner_reward = self.local_winner_reward_hours
         self.burn_after_winner_days = float(os.getenv('BURN_AFTER_WINNER_DAYS', '0'))
         
         # Convert hours to days for internal consistency
         self.initial_burn_days = self.total_hours_for_winner_reward / 24
         self.winner_reward_days = self.total_hours_for_winner_reward / 24
         
-        logger.info(f"Emission config: Winner reward={self.total_hours_for_winner_reward}h ({self.winner_reward_days}d)")
+        logger.info(f"Emission config: Local fallback winner reward={self.local_winner_reward_hours}h, Active={self.total_hours_for_winner_reward}h")
+
+    def update_winner_reward_hours_from_server(self, winner_reward_hours: Optional[float]):
+        """
+        Update winner reward hours from challenge server
+        Falls back to local .env value if server value is invalid
+        
+        Args:
+            winner_reward_hours: Hours from challenge server, or None if not available
+        """
+        if winner_reward_hours is not None and winner_reward_hours > 0:
+            if self.total_hours_for_winner_reward != winner_reward_hours:
+                logger.info(f"Updating winner reward hours: {self.total_hours_for_winner_reward}h → {winner_reward_hours}h (from challenge server)")
+                self.total_hours_for_winner_reward = winner_reward_hours
+                # Update derived values
+                self.initial_burn_days = self.total_hours_for_winner_reward / 24
+                self.winner_reward_days = self.total_hours_for_winner_reward / 24
+                self.save_state()
+            else:
+                logger.debug(f"Winner reward hours unchanged: {winner_reward_hours}h")
+        else:
+            # Fallback to local value
+            if self.total_hours_for_winner_reward != self.local_winner_reward_hours:
+                logger.warning(f"Invalid winner reward hours from server ({winner_reward_hours}), using local fallback: {self.local_winner_reward_hours}h")
+                self.total_hours_for_winner_reward = self.local_winner_reward_hours
+                self.initial_burn_days = self.total_hours_for_winner_reward / 24
+                self.winner_reward_days = self.total_hours_for_winner_reward / 24
+                self.save_state()
     
     def load_state(self):
         """Load emission state from file"""
@@ -54,9 +85,16 @@ class EmissionManager:
                     self.first_challenge_end_time = data.get('first_challenge_end_time')
                     self.winner_reward_start_time = data.get('winner_reward_start_time')
                     self.current_phase = data.get('current_phase', 'initial_burn')
-                    self.current_winner = data.get('current_winner')  # Restore winner
-                    self.current_winner_score = data.get('current_winner_score', 0.0)  # ADD THIS LINE
-                    self.last_challenge_end_time = data.get('last_challenge_end_time')  # Restore last challenge end
+                    self.current_winner = data.get('current_winner')
+                    self.current_winner_score = data.get('current_winner_score', 0.0)
+                    self.last_challenge_end_time = data.get('last_challenge_end_time')
+                    
+                    # Restore winner reward hours if saved
+                    saved_hours = data.get('total_hours_for_winner_reward')
+                    if saved_hours is not None:
+                        self.total_hours_for_winner_reward = saved_hours
+                        self.initial_burn_days = self.total_hours_for_winner_reward / 24
+                        self.winner_reward_days = self.total_hours_for_winner_reward / 24
                     
                     # Convert ISO strings back to datetime objects
                     if self.subnet_start_time:
@@ -68,7 +106,7 @@ class EmissionManager:
                     if self.last_challenge_end_time:
                         self.last_challenge_end_time = datetime.fromisoformat(self.last_challenge_end_time)
                         
-                logger.info(f"Loaded emission state: phase={self.current_phase}, winner={self.current_winner[:12] + '...' if self.current_winner else 'None'}")
+                logger.info(f"Loaded emission state: phase={self.current_phase}, winner={self.current_winner[:12] + '...' if self.current_winner else 'None'}, reward_hours={self.total_hours_for_winner_reward}h")
         except Exception as e:
             logger.error(f"Error loading emission state: {e}")
     
@@ -81,8 +119,9 @@ class EmissionManager:
                 'winner_reward_start_time': self.winner_reward_start_time.isoformat() if self.winner_reward_start_time else None,
                 'current_phase': self.current_phase,
                 'current_winner': self.current_winner,
-                'current_winner_score': self.current_winner_score,  # ADD THIS LINE
+                'current_winner_score': self.current_winner_score,
                 'last_challenge_end_time': self.last_challenge_end_time.isoformat() if self.last_challenge_end_time else None,
+                'total_hours_for_winner_reward': self.total_hours_for_winner_reward,  # ADD THIS LINE
                 'updated_at': datetime.now(timezone.utc).isoformat()
             }
             with open('emission_state.json', 'w') as f:

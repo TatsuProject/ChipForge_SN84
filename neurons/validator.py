@@ -433,6 +433,13 @@ class ChipForgeValidator:
             
             # Challenge exists - check if it's the same one or new one
             challenge_id = challenge['challenge_id']
+
+            if 'winner_reward_hours' in challenge:
+                self.emission_manager.update_winner_reward_hours_from_server(challenge['winner_reward_hours'])
+            else:
+                # Server didn't provide value, use local fallback
+                logger.warning("Challenge server didn't provide winner_reward_hours, using local .env fallback")
+                self.emission_manager.update_winner_reward_hours_from_server(None)
             
             if self._challenge_ended_grace_period_start is not None:
                 # We were in grace period, but challenge appeared
