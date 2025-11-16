@@ -645,63 +645,96 @@ class APIClient:
     
     async def submit_evaluation(self, challenge_id: str, submission_id: str, evaluation: Dict) -> bool:
         """Submit evaluation for a single submission using form data - skip if evaluation failed"""
-        try:
-            # Check if evaluation failed - if so, skip submission
-            if evaluation['overall_score'] == 'failed':
-                logger.warning(f"Skipping submission of failed evaluation for {submission_id}")
-                logger.info(f"Evaluation failed for {submission_id}, validator can retry this submission in next batch")
-                return False  # Return False but don't treat as error
-            
-            url = f"{self.api_url}/api/v1/challenges/{challenge_id}/submissions/{submission_id}/submit_score"
-            
-            # Create signature for authentication
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            message = f"{self.validator_hotkey}{timestamp}"
-            signature = self.create_signature(message)
-            
-            # Authentication parameters go in query params
-            params = {
-                'validator_hotkey': self.validator_hotkey,
-                'signature': signature,
-                'timestamp': timestamp
-            }
-            
-            # Headers (no Content-Type needed for form data)
-            headers = {
-                'X-Validator-Secret': self.validator_secret
-            }
-            
-            # Evaluation data as FORM DATA (not JSON)
-            form_data = {
-                'overall_score': str(evaluation['overall_score']),
-                'functionality_score': str(evaluation['functionality_score']),
-                'area_score': str(evaluation['area_score']),
-                'delay_score': str(evaluation['delay_score']),
-                'power_score': str(evaluation['power_score']),
-                'passed_testbench': str(evaluation['passed_testbench']).lower(),  # boolean as string
-                'evaluation_notes': evaluation.get('evaluation_notes', '')
-            }
-            
-            logger.info(f"Submitting evaluation for {submission_id} as form data:")
-            logger.info(f"  Form data: {form_data}")
-            
-            # Send as form data (not JSON)
-            async with self.session.post(url, params=params, headers=headers, data=form_data) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    logger.info(f"Successfully submitted evaluation for {submission_id}: score {evaluation['overall_score']}")
-                    logger.info(f"Server response: {result}")
-                    return True
+        # Check if evaluation failed - if so, skip submission
+        if evaluation['overall_score'] == 'failed':
+            logger.warning(f"Skipping submission of failed evaluation for {submission_id}")
+            logger.info(f"Evaluation failed for {submission_id}, validator can retry this submission in next batch")
+            return False  # Return False but don't treat as error
+
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                url = f"{self.api_url}/api/v1/challenges/{challenge_id}/submissions/{submission_id}/submit_score"
+
+                # Create signature for authentication
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                message = f"{self.validator_hotkey}{timestamp}"
+                signature = self.create_signature(message)
+
+                # Authentication parameters go in query params
+                params = {
+                    'validator_hotkey': self.validator_hotkey,
+                    'signature': signature,
+                    'timestamp': timestamp
+                }
+
+                # Headers (no Content-Type needed for form data)
+                headers = {
+                    'X-Validator-Secret': self.validator_secret
+                }
+
+                # Evaluation data as FORM DATA (not JSON)
+                form_data = {
+                    'overall_score': str(evaluation['overall_score']),
+                    'functionality_score': str(evaluation['functionality_score']),
+                    'area_score': str(evaluation['area_score']),
+                    'delay_score': str(evaluation['delay_score']),
+                    'power_score': str(evaluation['power_score']),
+                    'passed_testbench': str(evaluation['passed_testbench']).lower(),  # boolean as string
+                    'evaluation_notes': evaluation.get('evaluation_notes', '')
+                }
+
+                if attempt == 0:
+                    logger.info(f"Submitting evaluation for {submission_id} as form data:")
+                    logger.info(f"  Form data: {form_data}")
                 else:
-                    error_text = await response.text()
-                    logger.error(f"Failed to submit evaluation for {submission_id}: {response.status} - {error_text}")
+                    logger.info(f"Retry attempt {attempt + 1}/{max_retries} for {submission_id}")
+
+                # Send as form data (not JSON)
+                async with self.session.post(url, params=params, headers=headers, data=form_data) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.info(f"Successfully submitted evaluation for {submission_id}: score {evaluation['overall_score']}")
+                        logger.info(f"Server response: {result}")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Failed to submit evaluation for {submission_id}: {response.status} - {error_text}")
+
+                        # Retry on server errors (500-599) or specific client errors
+                        if response.status >= 500 and attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                            logger.warning(f"Server error {response.status}, retrying in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            return False
+
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout submitting evaluation for {submission_id} (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.info(f"Retrying after timeout in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
                     return False
-                    
-        except Exception as e:
-            logger.error(f"Error submitting evaluation for {submission_id}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
+
+            except Exception as e:
+                logger.error(f"Error submitting evaluation for {submission_id} (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt == 0:  # Only log traceback on first attempt to reduce noise
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.info(f"Retrying after exception in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    return False
+
+        logger.error(f"Failed to submit evaluation for {submission_id} after {max_retries} attempts")
+        return False
 
     async def download_test_cases(self, challenge_id: str) -> bool:
         """Download and extract test cases for a challenge"""
