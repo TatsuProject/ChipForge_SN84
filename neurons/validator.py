@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 class ChipForgeValidator:
     """ChipForge Subnet Validator with modular architecture"""
     
+    
+    def set_weights_with_ban_check(self, weights: dict, context: str = ""):
+        """Set weights with ban_emissions check"""
+        if self.state.ban_emissions:
+            logger.warning(f"EMISSIONS BANNED by challenge server - burning emissions ({context})")
+            self.weight_manager.set_burn_weights()
+        else:
+            self.weight_manager.set_weights(weights)
+    
     def __init__(self, config):
         self.config = config
         self.wallet = bt.wallet(config=config)
@@ -85,7 +94,17 @@ class ChipForgeValidator:
             
             if current_challenge_active:
                 challenge_id = challenge['challenge_id']
-                
+
+                # Fetch baseline score for the challenge
+                try:
+                    challenge_info = await self.api_client.get_challenge_info(challenge_id)
+                    if challenge_info and 'winner_baseline_score' in challenge_info:
+                        self.state.winner_baseline_score = challenge_info['winner_baseline_score']
+                        logger.info(f"Crash recovery: Loaded baseline score {self.state.winner_baseline_score}")
+                        self.state.save_state()
+                except Exception as e:
+                    logger.error(f"Error fetching baseline score during crash recovery: {e}")
+
                 # Check if it's the same challenge we were working on
                 if self.state.last_challenge_id == challenge_id:
                     logger.info(f"Continuing with same challenge {challenge_id}")
@@ -96,8 +115,9 @@ class ChipForgeValidator:
                     self.state.current_challenge_best = (None, 0.0)
                     self.state.last_challenge_id = challenge_id
                     self.state.save_state()
-                
-                remaining_time = await self.api_client.get_challenge_remaining_time(challenge_id)
+
+                challenge_info = await self.api_client.get_challenge_info(challenge_id)
+                remaining_time = challenge_info.get('remaining_time') if challenge_info else None
                 if remaining_time and remaining_time > 0:
                     logger.info(f"Active challenge {challenge_id}: {remaining_time/3600:.1f}h remaining")
                     self.next_batch_check = datetime.now(timezone.utc) + timedelta(seconds=10)
@@ -137,9 +157,9 @@ class ChipForgeValidator:
             # Restore winner state if we have current challenge winner
             if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
                 winner_hotkey, winner_score = self.state.current_challenge_best
-                
+
                 # Check if this winner should still be getting rewards
-                reward_hotkey = self.emission_manager.get_reward_hotkey(winner_hotkey)
+                reward_hotkey = self.emission_manager.get_reward_hotkey(winner_hotkey, winner_score)
                 if reward_hotkey:
                     # Try to set weights for the winner if they're still on subnet
                     uid = self.weight_manager.get_hotkey_uid(winner_hotkey)
@@ -152,9 +172,10 @@ class ChipForgeValidator:
             # If no current challenge winner but we have historical winners, check emission manager
             elif self.emission_manager.current_winner:
                 winner_hotkey = self.emission_manager.current_winner
-                
+                winner_score = self.emission_manager.current_winner_score
+
                 # Check if this historical winner should still be getting rewards
-                reward_hotkey = self.emission_manager.get_reward_hotkey(winner_hotkey)
+                reward_hotkey = self.emission_manager.get_reward_hotkey(winner_hotkey, winner_score)
                 if reward_hotkey:
                     uid = self.weight_manager.get_hotkey_uid(winner_hotkey)
                     if uid is not None:
@@ -277,7 +298,7 @@ class ChipForgeValidator:
                                     if uid is not None:
                                         weights = {reward_hotkey: 1.0}
                                         logger.info(f"Server unreachable - using cached winner {reward_hotkey[:12]}... (reward period active)")
-                                        self.weight_manager.set_weights(weights)
+                                        self.set_weights_with_ban_check(weights, "server unreachable - cached winner")
                                     else:
                                         logger.info("Server unreachable - winner not on subnet, burning emissions")
                                         self.weight_manager.set_burn_weights()
@@ -291,7 +312,7 @@ class ChipForgeValidator:
                                 winner_hotkey = self.state.current_challenge_best[0]
                                 winner_score = self.state.current_challenge_best[1]
                                 winner_discovery_time = self.state.current_challenge_best_timestamp or datetime.now(timezone.utc)
-                                self.emission_manager.update_winner(winner_hotkey, winner_score, winner_discovery_time)
+                                self.emission_manager.update_winner(winner_hotkey, winner_score, self.state.winner_baseline_score, winner_discovery_time)
                             else:
                                 self.emission_manager.mark_challenge_ended()
                             
@@ -327,7 +348,7 @@ class ChipForgeValidator:
                                 if uid is not None:
                                     weights = {reward_hotkey: 1.0}
                                     logger.info(f"Grace period: Using cached winner {reward_hotkey[:12]}... (reward period active)")
-                                    self.weight_manager.set_weights(weights)
+                                    self.set_weights_with_ban_check(weights, "grace period - cached winner")
                                 else:
                                     logger.info("Grace period: Winner not on subnet - burning emissions")
                                     self.weight_manager.set_burn_weights()
@@ -362,7 +383,7 @@ class ChipForgeValidator:
                                     if uid is not None:
                                         weights = {reward_hotkey: 1.0}
                                         logger.info(f"Grace period: Using cached winner {reward_hotkey[:12]}... (reward period active)")
-                                        self.weight_manager.set_weights(weights)
+                                        self.set_weights_with_ban_check(weights, "grace period - cached winner")
                                     else:
                                         logger.info("Grace period: Winner not on subnet - burning emissions")
                                         self.weight_manager.set_burn_weights()
@@ -393,7 +414,7 @@ class ChipForgeValidator:
                                 winner_discovery_time = self.state.current_challenge_best_timestamp or datetime.now(timezone.utc)
                                 
                                 logger.info(f"Starting winner reward period for {winner_hotkey[:12]}... (score: {winner_score})")
-                                self.emission_manager.update_winner(winner_hotkey, winner_score, winner_discovery_time)
+                                self.emission_manager.update_winner(winner_hotkey, winner_score, self.state.winner_baseline_score, winner_discovery_time)
                             else:
                                 logger.info(f"Challenge {self.state.last_challenge_id} completed but no winner found")
                                 self.emission_manager.mark_challenge_ended()
@@ -414,13 +435,13 @@ class ChipForgeValidator:
                     self.weight_manager.set_burn_weights()
                 else:
                     reward_hotkey = self.emission_manager.get_reward_hotkey()
-                    
+
                     if reward_hotkey:
                         uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
                         if uid is not None:
                             weights = {reward_hotkey: 1.0}
                             logger.info(f"No active challenge, but rewarding winner {reward_hotkey[:12]}... (emission manager active)")
-                            self.weight_manager.set_weights(weights)
+                            self.set_weights_with_ban_check(weights, "no active challenge - emission manager winner")
                         else:
                             logger.info("No active challenge, winner not on subnet - burning emissions")
                             self.weight_manager.set_burn_weights()
@@ -460,9 +481,9 @@ class ChipForgeValidator:
                         winner_discovery_time = self.state.current_challenge_best_timestamp or datetime.now(timezone.utc)
                         
                         logger.info(f"Starting winner reward for previous challenge winner {winner_hotkey[:12]}... (score: {winner_score})")
-                        self.emission_manager.update_winner(winner_hotkey, winner_score, winner_discovery_time)
+                        self.emission_manager.update_winner(winner_hotkey, winner_score, self.state.winner_baseline_score, winner_discovery_time)
 
-            # Check for expiration time updates periodically (every 1 minute)
+            # Check for expiration time and baseline score updates periodically (every 1 minute)
             if not hasattr(self, '_last_expiration_check'):
                 self._last_expiration_check = {}
 
@@ -471,6 +492,27 @@ class ChipForgeValidator:
 
             if (current_time - last_check).total_seconds() > 60:
                 await self.check_challenge_expiration_update(challenge_id)
+
+                # Also update baseline score and ban_emissions periodically since they can change
+                try:
+                    challenge_info = await self.api_client.get_challenge_info(challenge_id)
+                    if challenge_info:
+                        # Update baseline score
+                        if 'winner_baseline_score' in challenge_info:
+                            if self.state.winner_baseline_score != challenge_info['winner_baseline_score']:
+                                logger.info(f"Baseline score updated: {self.state.winner_baseline_score} -> {challenge_info['winner_baseline_score']}")
+                                self.state.winner_baseline_score = challenge_info['winner_baseline_score']
+                                self.state.save_state()
+                        
+                        # Update ban_emissions flag
+                        if 'ban_emissions' in challenge_info:
+                            if self.state.ban_emissions != challenge_info['ban_emissions']:
+                                logger.warning(f"Emissions ban status changed: {self.state.ban_emissions} -> {challenge_info['ban_emissions']}")
+                                self.state.ban_emissions = challenge_info['ban_emissions']
+                                self.state.save_state()
+                except Exception as e:
+                    logger.error(f"Error updating baseline score and ban_emissions: {e}")
+
                 self._last_expiration_check[challenge_id] = current_time
             
             # NEW CHALLENGE DETECTED - Reset both validator state AND emission manager
@@ -487,6 +529,21 @@ class ChipForgeValidator:
                         logger.warning(f"Failed to download test cases for challenge {challenge_id}")
                 except Exception as e:
                     logger.error(f"Error downloading test cases for challenge {challenge_id}: {e}")
+
+                # Fetch challenge info including baseline score
+                logger.info(f"Fetching challenge info for {challenge_id}")
+                try:
+                    challenge_info = await self.api_client.get_challenge_info(challenge_id)
+                    if challenge_info:
+                        if 'winner_baseline_score' in challenge_info:
+                            self.state.winner_baseline_score = challenge_info['winner_baseline_score']
+                            logger.info(f"Updated winner baseline score: {self.state.winner_baseline_score}")
+                        else:
+                            logger.warning(f"Challenge info missing winner_baseline_score, keeping previous: {self.state.winner_baseline_score}")
+                    else:
+                        logger.warning(f"Failed to fetch challenge info for {challenge_id}")
+                except Exception as e:
+                    logger.error(f"Error fetching challenge info: {e}")
 
                 # Store challenge expiration time
                 if 'expires_at' in challenge:
@@ -557,7 +614,7 @@ class ChipForgeValidator:
                         if uid is not None:
                             weights = {reward_hotkey: 1.0}
                             logger.info(f"Setting current challenge winner weights: {reward_hotkey[:12]}...")
-                            self.weight_manager.set_weights(weights)
+                            self.set_weights_with_ban_check(weights, "current challenge winner")
                         else:
                             logger.info("Current challenge winner not on subnet - burning emissions")
                             self.weight_manager.set_burn_weights()
@@ -596,7 +653,7 @@ class ChipForgeValidator:
                     if uid is not None:
                         weights = {current_winner: 1.0}
                         logger.info(f"Batch processing failed, using current challenge winner {current_winner[:12]}...")
-                        self.weight_manager.set_weights(weights)
+                        self.set_weights_with_ban_check(weights, "current challenge winner")
                     else:
                         logger.info("Batch processing failed, current winner not on subnet - burning emissions")
                         self.weight_manager.set_burn_weights()
@@ -628,7 +685,7 @@ class ChipForgeValidator:
                     if uid is not None:
                         weights = {current_winner: 1.0}
                         logger.info(f"Error fallback: Using current challenge winner {current_winner[:12]}...")
-                        self.weight_manager.set_weights(weights)
+                        self.set_weights_with_ban_check(weights, "current challenge winner")
                     else:
                         self.weight_manager.set_burn_weights()
                 else:

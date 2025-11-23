@@ -100,7 +100,28 @@ class BatchProcessor:
             self.state.evaluation_in_progress = True
             self.state.current_batch_id = batch_id
             self.state.save_state()
-            
+
+            # CRITICAL: Fetch FRESH baseline BEFORE evaluation (it may have changed since last check)
+            logger.info(f"Fetching fresh baseline score for challenge {challenge_id} before evaluation")
+            try:
+                challenge_info = await self.api_client.get_challenge_info(challenge_id)
+                if challenge_info and 'winner_baseline_score' in challenge_info:
+                    fresh_baseline = challenge_info['winner_baseline_score']
+                    if self.state.winner_baseline_score != fresh_baseline:
+                        logger.info(f"Baseline updated before evaluation: {self.state.winner_baseline_score} -> {fresh_baseline}")
+                        self.state.winner_baseline_score = fresh_baseline
+                        self.state.save_state()
+                    else:
+                        logger.info(f"Using baseline score: {fresh_baseline}")
+                else:
+                    logger.warning(f"Could not fetch fresh baseline, using cached: {self.state.winner_baseline_score}")
+            except Exception as e:
+                logger.error(f"Error fetching fresh baseline: {e}, using cached: {self.state.winner_baseline_score}")
+
+            # Store baseline snapshot for this evaluation (captured BEFORE submitting scores)
+            evaluation_baseline_snapshot = self.state.winner_baseline_score
+            logger.info(f"Baseline snapshot for this evaluation: {evaluation_baseline_snapshot}")
+
             # Download submissions
             logger.info(f"Downloading submissions for batch {batch_id}")
             downloaded_submissions = await self.api_client.download_batch_submissions(challenge_id, batch)
@@ -109,103 +130,117 @@ class BatchProcessor:
             if not downloaded_submissions:
                 logger.warning(f"No submissions downloaded for batch {batch_id}")
                 return False
-            
+
             # Evaluate with EDA server
             logger.info(f"Evaluating {len(downloaded_submissions)} submissions with EDA server")
             evaluations = await self.api_client.evaluate_submissions_with_eda_server(challenge_id, downloaded_submissions)
             if not evaluations:
                 logger.error(f"No evaluations received from EDA server")
                 return False
-            
+
             logger.info(f"Received {len(evaluations)} evaluations from EDA server")
-            
-            # Submit evaluations to challenge server
+
+            # Submit evaluations to challenge server (this may update baseline on server)
             logger.info(f"Submitting {len(evaluations)} evaluations to challenge server")
             submission_results = await self.api_client.submit_all_evaluations(challenge_id, evaluations)
             successful_submissions = {k: v for k, v in evaluations.items() if submission_results.get(k, False)}
-            
+
             if not successful_submissions:
                 logger.error("No evaluations were successfully submitted")
                 return False
-            
+
             logger.info(f"Successfully submitted {len(successful_submissions)} evaluations")
-            
+
             # Extract hotkeys from filenames
             submission_hotkeys = self.extract_hotkeys_from_filenames(batch_id, successful_submissions)
-            
+
             current_best_score = self.state.current_challenge_best[1] if hasattr(self.state, 'current_challenge_best') else 0.0
             current_best_hotkey = self.state.current_challenge_best[0] if hasattr(self.state, 'current_challenge_best') else None
-            
+
             logger.info(f"Current challenge best: {current_best_hotkey[:12] if current_best_hotkey else 'None'}... -> {current_best_score}")
-            
-            # Find if any submission in this batch beats the challenge-wide best
+
+            # Find if any submission in this batch beats the challenge-wide best AND baseline SNAPSHOT
             new_champion = None
             new_best_score = current_best_score
-            
+
             for submission_id, eval_data in successful_submissions.items():
                 hotkey = submission_hotkeys.get(submission_id)
                 overall_score = eval_data.get('overall_score', 0)
-                
+
+                # Check if score beats both current best AND baseline snapshot (from BEFORE submission)
                 if hotkey and overall_score > new_best_score:
-                    new_best_score = overall_score
-                    new_champion = hotkey
-                    logger.info(f"New challenge champion found: {hotkey[:12]}... -> {overall_score} (beats previous: {current_best_score})")
+                    if overall_score > evaluation_baseline_snapshot:
+                        new_best_score = overall_score
+                        new_champion = hotkey
+                        logger.info(f"New challenge champion found: {hotkey[:12]}... -> {overall_score} (beats previous: {current_best_score} and baseline snapshot: {evaluation_baseline_snapshot})")
+                    else:
+                        logger.info(f"Submission {hotkey[:12]}... score {overall_score} beats previous ({current_best_score}) but does NOT beat baseline snapshot ({evaluation_baseline_snapshot}) - not eligible for reward")
 
             # Update challenge-wide best if we found a new champion
             if new_champion:
                 self.state.update_best_miner(challenge_id, new_champion, new_best_score)
-    
+
                 # Update current challenge best (separate tracking)
                 self.state.current_challenge_best = (new_champion, new_best_score)
-                
-                # Update emission manager with new winner
-                self.emission_manager.update_winner(new_champion, new_best_score, winner_timestamp=None)
+
+                # Update emission manager with new winner + baseline snapshot they qualified against
+                self.emission_manager.update_winner(new_champion, new_best_score, evaluation_baseline_snapshot, winner_timestamp=None)
                 
                 # Check if new champion is on subnet and get UID
-                try:
-                    uid = self.weight_manager.get_hotkey_uid(new_champion)
-                    if uid is not None:
-                        # Set weights: 1.0 for new champion, 0.0 for others
-                        weights = {new_champion: 1.0}
-                        logger.info(f"Setting NEW CHAMPION weights: {new_champion[:12]}... (UID {uid}) = 1.0, score: {new_best_score}")
-                        
-                        weight_success = self.weight_manager.set_weights(weights)
-                        if not weight_success:
-                            logger.error("Failed to set weights, burning emissions")
-                            self.weight_manager.set_burn_weights()
-                    else:
-                        logger.warning(f"New champion {new_champion[:12]}... not found on subnet, burning emissions")
-                        self.weight_manager.set_burn_weights()
-                except Exception as e:
-                    logger.error(f"Error getting UID for new champion: {e}, burning emissions")
+                # Check emissions ban before setting weights
+                if self.state.ban_emissions:
+                    logger.warning(f"EMISSIONS BANNED by challenge server - burning instead of rewarding new champion {new_champion[:12]}...")
                     self.weight_manager.set_burn_weights()
-                    
-            else:
-                # No new champion found - check emission management policy
-                logger.info(f"No submissions beat challenge best of {current_best_score}")
-                
-                # Get reward hotkey from emission manager (considers winner reward period)
-                reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey)
-                should_burn = self.emission_manager.should_burn_emissions(current_best_score)
-                
-                if reward_hotkey and not should_burn:
-                    # Continue rewarding current winner/champion
+                else:
                     try:
-                        uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
+                        uid = self.weight_manager.get_hotkey_uid(new_champion)
                         if uid is not None:
-                            weights = {reward_hotkey: 1.0}
-                            logger.info(f"Challenge active, winner {reward_hotkey[:12]}... taking reward until next good submission")
+                            # Set weights: 1.0 for new champion, 0.0 for others
+                            weights = {new_champion: 1.0}
+                            logger.info(f"Setting NEW CHAMPION weights: {new_champion[:12]}... (UID {uid}) = 1.0, score: {new_best_score}")
                             
                             weight_success = self.weight_manager.set_weights(weights)
                             if not weight_success:
                                 logger.error("Failed to set weights, burning emissions")
                                 self.weight_manager.set_burn_weights()
                         else:
-                            logger.warning(f"Reward target {reward_hotkey[:12]}... not found on subnet, burning emissions")
+                            logger.warning(f"New champion {new_champion[:12]}... not found on subnet, burning emissions")
                             self.weight_manager.set_burn_weights()
                     except Exception as e:
-                        logger.error(f"Error getting UID for reward target: {e}, burning emissions")
+                        logger.error(f"Error getting UID for new champion: {e}, burning emissions")
                         self.weight_manager.set_burn_weights()
+                    
+            else:
+                # No new champion found - check emission management policy
+                logger.info(f"No submissions beat challenge best of {current_best_score}")
+
+                # Get reward hotkey from emission manager (NO baseline check - winner already qualified)
+                reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey, current_best_score)
+                should_burn = self.emission_manager.should_burn_emissions(current_best_score)
+                
+                if reward_hotkey and not should_burn:
+                    # Check emissions ban before continuing to reward
+                    if self.state.ban_emissions:
+                        logger.warning(f"EMISSIONS BANNED by challenge server - burning instead of rewarding {reward_hotkey[:12]}...")
+                        self.weight_manager.set_burn_weights()
+                    else:
+                        # Continue rewarding current winner/champion
+                        try:
+                            uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
+                            if uid is not None:
+                                weights = {reward_hotkey: 1.0}
+                                logger.info(f"Challenge active, winner {reward_hotkey[:12]}... taking reward until next good submission")
+                                
+                                weight_success = self.weight_manager.set_weights(weights)
+                                if not weight_success:
+                                    logger.error("Failed to set weights, burning emissions")
+                                    self.weight_manager.set_burn_weights()
+                            else:
+                                logger.warning(f"Reward target {reward_hotkey[:12]}... not found on subnet, burning emissions")
+                                self.weight_manager.set_burn_weights()
+                        except Exception as e:
+                            logger.error(f"Error getting UID for reward target: {e}, burning emissions")
+                            self.weight_manager.set_burn_weights()
                 else:
                     # Should burn emissions
                     if self.emission_manager.current_winner:

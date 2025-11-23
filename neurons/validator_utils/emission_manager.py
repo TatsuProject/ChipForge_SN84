@@ -28,9 +28,10 @@ class EmissionManager:
         self.winner_reward_start_time = None
         self.current_phase = "initial_burn"
         self.current_winner = None  # Add persistence for current winner
-        self.current_winner_score = 0.0  # ADD THIS LINE - Track winner's score
+        self.current_winner_score = 0.0  # Track winner's score
+        self.winner_qualified_baseline = 0.0  # Baseline snapshot when winner was crowned
         self.last_challenge_end_time = None  # Track when last challenge ended
-        
+
         self.load_state()
     
     def load_config(self):
@@ -87,6 +88,7 @@ class EmissionManager:
                     self.current_phase = data.get('current_phase', 'initial_burn')
                     self.current_winner = data.get('current_winner')
                     self.current_winner_score = data.get('current_winner_score', 0.0)
+                    self.winner_qualified_baseline = data.get('winner_qualified_baseline', 0.0)
                     self.last_challenge_end_time = data.get('last_challenge_end_time')
                     
                     # Restore winner reward hours if saved
@@ -106,7 +108,7 @@ class EmissionManager:
                     if self.last_challenge_end_time:
                         self.last_challenge_end_time = datetime.fromisoformat(self.last_challenge_end_time)
                         
-                logger.info(f"Loaded emission state: phase={self.current_phase}, winner={self.current_winner[:12] + '...' if self.current_winner else 'None'}, reward_hours={self.total_hours_for_winner_reward}h")
+                logger.info(f"Loaded emission state: phase={self.current_phase}, winner={self.current_winner[:12] + '...' if self.current_winner else 'None'}, score={self.current_winner_score}, qualified_baseline={self.winner_qualified_baseline}, reward_hours={self.total_hours_for_winner_reward}h")
         except Exception as e:
             logger.error(f"Error loading emission state: {e}")
     
@@ -120,8 +122,9 @@ class EmissionManager:
                 'current_phase': self.current_phase,
                 'current_winner': self.current_winner,
                 'current_winner_score': self.current_winner_score,
+                'winner_qualified_baseline': self.winner_qualified_baseline,
                 'last_challenge_end_time': self.last_challenge_end_time.isoformat() if self.last_challenge_end_time else None,
-                'total_hours_for_winner_reward': self.total_hours_for_winner_reward,  # ADD THIS LINE
+                'total_hours_for_winner_reward': self.total_hours_for_winner_reward,
                 'updated_at': datetime.now(timezone.utc).isoformat()
             }
             with open('emission_state.json', 'w') as f:
@@ -147,46 +150,50 @@ class EmissionManager:
         self.save_state()
         logger.info(f"First challenge completed, winner: {winner_hotkey[:12]}...")
     
-    def update_winner(self, winner_hotkey: str, winner_score: float, winner_timestamp: Optional[datetime] = None):
+    def update_winner(self, winner_hotkey: str, winner_score: float, qualified_baseline: float, winner_timestamp: Optional[datetime] = None):
         """
         Update current winner ONLY if it's a new winner or score improved.
-        
+        CAPTURES the baseline snapshot that the winner beat to qualify.
+
         Rules:
-        1. Different hotkey → Reset timer
-        2. Same hotkey, higher score → Reset timer  
+        1. Different hotkey → Reset timer, capture new baseline snapshot
+        2. Same hotkey, higher score → Reset timer, capture new baseline snapshot
         3. Same hotkey, same/lower score → Do nothing (keep existing timer)
-        
+
         Args:
             winner_hotkey: Hotkey of the winner
             winner_score: Winner's score
+            qualified_baseline: The baseline score this winner beat to qualify
             winner_timestamp: When this winner was found (defaults to now)
         """
         if winner_timestamp is None:
             winner_timestamp = datetime.now(timezone.utc)
-        
+
         # Check if this is actually a new winner or improvement
         is_new_winner = self.current_winner != winner_hotkey
         is_improvement = (self.current_winner == winner_hotkey and winner_score > self.current_winner_score)
-        
+
         if is_new_winner:
             # Different hotkey - new winner
-            logger.info(f"NEW WINNER: {winner_hotkey[:12]}... (score: {winner_score}) replaces {self.current_winner[:12] if self.current_winner else 'None'}... (score: {self.current_winner_score})")
+            logger.info(f"NEW WINNER: {winner_hotkey[:12]}... (score: {winner_score}, beat baseline: {qualified_baseline}) replaces {self.current_winner[:12] if self.current_winner else 'None'}... (score: {self.current_winner_score})")
             self.current_winner = winner_hotkey
             self.current_winner_score = winner_score
+            self.winner_qualified_baseline = qualified_baseline  # Capture baseline snapshot
             self.winner_reward_start_time = winner_timestamp
             self.current_phase = "winner_reward"
             logger.info(f"Reward period starts at {winner_timestamp} for {self.total_hours_for_winner_reward}h")
             self.save_state()
-            
+
         elif is_improvement:
-            # Same winner improved their score - reset timer
-            logger.info(f"WINNER IMPROVED: {winner_hotkey[:12]}... score {self.current_winner_score} → {winner_score}")
+            # Same winner improved their score - reset timer and update baseline
+            logger.info(f"WINNER IMPROVED: {winner_hotkey[:12]}... score {self.current_winner_score} → {winner_score}, beat baseline: {qualified_baseline}")
             self.current_winner_score = winner_score
+            self.winner_qualified_baseline = qualified_baseline  # Update baseline snapshot
             self.winner_reward_start_time = winner_timestamp
             self.current_phase = "winner_reward"
             logger.info(f"Reward timer RESET at {winner_timestamp} for {self.total_hours_for_winner_reward}h")
             self.save_state()
-            
+
         else:
             # Same winner, same/lower score - do nothing
             logger.debug(f"Same winner {winner_hotkey[:12]}... with same/lower score ({winner_score} vs {self.current_winner_score}) - keeping existing timer")
@@ -366,10 +373,11 @@ class EmissionManager:
     def get_reward_hotkey(self, current_best_hotkey: Optional[str] = None, current_best_score: float = 0.0) -> Optional[str]:
         """
         Get hotkey that should receive rewards.
-        
-        Logic:
-        - If in winner_reward phase: Return current_winner
+
+        NEW LOGIC - No baseline re-checking:
+        - If in winner_reward phase: Return current_winner (already qualified with their baseline snapshot)
         - If not: Only return hotkey if score BEATS our last rewarded score
+        - Baseline checking happens ONLY during evaluation in batch_processor
         - Otherwise: Return None (burn)
         """
         if self.current_phase == "winner_reward" and self.current_winner:
@@ -377,10 +385,11 @@ class EmissionManager:
             if self.winner_reward_start_time:
                 now = datetime.now(timezone.utc)
                 reward_period_end = self.winner_reward_start_time + timedelta(hours=self.total_hours_for_winner_reward)
-                
+
                 if now < reward_period_end:
+                    # NO baseline check - winner already qualified when they beat their snapshot baseline
                     remaining = (reward_period_end - now).total_seconds() / 3600
-                    logger.info(f"Winner reward active: {self.current_winner[:12]}... ({remaining:.2f}h remaining)")
+                    logger.info(f"Winner reward active: {self.current_winner[:12]}... ({remaining:.2f}h remaining, score: {self.current_winner_score}, qualified_baseline: {self.winner_qualified_baseline})")
                     return self.current_winner
                 else:
                     # Period expired
@@ -388,16 +397,20 @@ class EmissionManager:
                     self.current_winner = None
                     self.save_state()
                     return None
-        
+
         # No active winner_reward phase
         # Only reward if new submission BEATS the last rewarded score
-        if current_best_hotkey and current_best_score > self.current_winner_score:
-            logger.info(f"New best found: {current_best_hotkey[:12]}... (score: {current_best_score}) beats last rewarded (score: {self.current_winner_score})")
-            return current_best_hotkey
-        else:
-            # Same or worse than what we already rewarded
-            if current_best_hotkey and current_best_score == self.current_winner_score:
-                logger.debug(f"Same winner {current_best_hotkey[:12]}... (score: {current_best_score}) - already rewarded, now burning")
-            elif current_best_hotkey:
-                logger.debug(f"Hotkey {current_best_hotkey[:12]}... (score: {current_best_score}) worse than last rewarded ({self.current_winner_score}) - burning")
-            return None
+        # NOTE: Baseline checking already done in batch_processor during evaluation
+        if current_best_hotkey:
+            if current_best_score > self.current_winner_score:
+                logger.info(f"New best found: {current_best_hotkey[:12]}... (score: {current_best_score}) beats last rewarded (score: {self.current_winner_score})")
+                return current_best_hotkey
+            else:
+                # Same or worse than what we already rewarded
+                if current_best_score == self.current_winner_score:
+                    logger.debug(f"Same winner {current_best_hotkey[:12]}... (score: {current_best_score}) - already rewarded, now burning")
+                else:
+                    logger.debug(f"Hotkey {current_best_hotkey[:12]}... (score: {current_best_score}) worse than last rewarded ({self.current_winner_score}) - burning")
+                return None
+
+        return None

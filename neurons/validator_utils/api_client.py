@@ -123,21 +123,43 @@ class APIClient:
             logger.error(f"Unexpected error getting challenge: {e}")
             raise
 
-    async def get_challenge_remaining_time(self, challenge_id: str) -> Optional[float]:
-        """Get remaining time for challenge in seconds"""
+    async def get_challenge_info(self, challenge_id: str) -> Optional[Dict]:
+        """Get challenge information including remaining time and winner baseline score"""
         try:
             url = f"{self.api_url}/api/v1/challenges/{challenge_id}/info"
             async with self.session.get(url) as response:
                 if response.status == 200:
                     challenge = await response.json()
-                    if challenge and 'expires_at' in challenge:
-                        expires_at = datetime.fromisoformat(challenge['expires_at'].replace('Z', '+00:00'))
-                        remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
-                        return max(0, remaining)
-            return None
+                    if challenge:
+                        result = {}
+
+                        # Extract remaining time
+                        if 'expires_at' in challenge:
+                            expires_at = datetime.fromisoformat(challenge['expires_at'].replace('Z', '+00:00'))
+                            remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+                            result['remaining_time'] = max(0, remaining)
+
+                        # Extract winner baseline score
+                        if 'winner_baseline_score' in challenge:
+                            result['winner_baseline_score'] = challenge['winner_baseline_score']
+                            logger.info(f"Challenge {challenge_id} winner baseline score: {challenge['winner_baseline_score']}")
+
+                        # Extract ban_emissions flag
+                        if 'ban_emissions' in challenge:
+                            result['ban_emissions'] = challenge['ban_emissions']
+                            if challenge['ban_emissions']:
+                                logger.warning(f"Challenge {challenge_id} has EMISSIONS BANNED")
+
+                        return result
+                return None
         except Exception as e:
-            logger.error(f"Error getting challenge remaining time: {e}")
+            logger.error(f"Error getting challenge info: {e}")
             return None
+
+    async def get_challenge_remaining_time(self, challenge_id: str) -> Optional[float]:
+        """Get remaining time for challenge in seconds (legacy method)"""
+        info = await self.get_challenge_info(challenge_id)
+        return info.get('remaining_time') if info else None
     
     async def get_current_batch(self, challenge_id: str) -> Optional[Dict]:
         """Get current evaluation batch with dynamic scheduling"""

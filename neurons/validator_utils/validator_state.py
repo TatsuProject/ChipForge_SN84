@@ -30,7 +30,9 @@ class ValidatorState:
         self.current_challenge_best: Tuple[Optional[str], float] = (None, 0.0)  # Current challenge only
         self.current_challenge_expires_at: Optional[datetime] = None
         self.current_challenge_best_timestamp: Optional[datetime] = None  # When current best was found
-        
+        self.winner_baseline_score: float = 0.0  # Baseline score for winner validation
+        self.ban_emissions: bool = False  # Emergency emissions ban flag
+
         self.load_state()
     
     def load_state(self):
@@ -57,8 +59,11 @@ class ValidatorState:
                     self.current_challenge_best_timestamp = data.get('current_challenge_best_timestamp', None)
                     if self.current_challenge_best_timestamp:
                         self.current_challenge_best_timestamp = datetime.fromisoformat(self.current_challenge_best_timestamp)
-                    
-                logger.info(f"Loaded validator state: batch={self.current_batch_id}, challenge={self.last_challenge_id}")
+
+                    self.winner_baseline_score = data.get('winner_baseline_score', 0.0)
+                    self.ban_emissions = data.get('ban_emissions', False)
+
+                logger.info(f"Loaded validator state: batch={self.current_batch_id}, challenge={self.last_challenge_id}, baseline_score={self.winner_baseline_score}, ban_emissions={self.ban_emissions}")
                     
         except Exception as e:
             logger.error(f"Error loading validator state: {e}")
@@ -77,6 +82,8 @@ class ValidatorState:
                 'current_challenge_best': list(self.current_challenge_best),
                 'current_challenge_expires_at': self.current_challenge_expires_at.isoformat() if self.current_challenge_expires_at else None,
                 'current_challenge_best_timestamp': self.current_challenge_best_timestamp.isoformat() if self.current_challenge_best_timestamp else None,
+                'winner_baseline_score': self.winner_baseline_score,
+                'ban_emissions': self.ban_emissions,
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }
             with open(self.state_file, 'w') as f:
