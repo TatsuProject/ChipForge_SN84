@@ -59,24 +59,32 @@ class BatchProcessor:
         """Calculate weights based on evaluation scores and map to miner hotkeys"""
         if not evaluations or not submission_hotkeys:
             return {}
-        
+
         # Create hotkey to best score mapping
         hotkey_scores = {}
-        
+
         for submission_id, eval_data in evaluations.items():
             miner_hotkey = submission_hotkeys.get(submission_id)
             if miner_hotkey:
+                # GATE CHECK: Both functional_gate and overall_gate must be True
+                functional_gate = eval_data.get('functional_gate', False)
+                overall_gate = eval_data.get('overall_gate', False)
+
+                if not functional_gate or not overall_gate:
+                    logger.info(f"Submission {submission_id} FAILED gates - skipping from weight calculation")
+                    continue
+
                 score = eval_data['overall_score']
                 # Keep the best score for each miner
                 if miner_hotkey not in hotkey_scores or score > hotkey_scores[miner_hotkey]:
                     hotkey_scores[miner_hotkey] = score
-        
+
         if not hotkey_scores:
             return {}
-        
+
         # Sort miners by best score
         sorted_miners = sorted(hotkey_scores.items(), key=lambda x: x[1], reverse=True)
-        
+
         # Winner-takes-all approach
         weights = {}
         for i, (hotkey, score) in enumerate(sorted_miners):
@@ -84,11 +92,11 @@ class BatchProcessor:
                 weights[hotkey] = 1.0
             else:  # All others get weight 0
                 weights[hotkey] = 0.0
-        
+
         winner_hotkey, winner_score = sorted_miners[0]
         logger.info(f"Calculated weights: winner={winner_hotkey[:12]}... (score: {winner_score})")
         logger.info(f"Total miners evaluated: {len(weights)}")
-        
+
         return weights
     
     async def process_batch(self, challenge_id: str, batch: Dict) -> bool:
@@ -166,6 +174,14 @@ class BatchProcessor:
             for submission_id, eval_data in successful_submissions.items():
                 hotkey = submission_hotkeys.get(submission_id)
                 overall_score = eval_data.get('overall_score', 0)
+
+                # GATE CHECK: Both functional_gate and overall_gate must be True to proceed
+                functional_gate = eval_data.get('functional_gate', False)
+                overall_gate = eval_data.get('overall_gate', False)
+
+                if not functional_gate or not overall_gate:
+                    logger.info(f"Submission {submission_id} ({hotkey[:12] if hotkey else 'unknown'}...) FAILED gates - functional_gate: {functional_gate}, overall_gate: {overall_gate} - skipping winner comparison")
+                    continue
 
                 # Check if score beats both current best AND baseline snapshot (from BEFORE submission)
                 if hotkey and overall_score > new_best_score:

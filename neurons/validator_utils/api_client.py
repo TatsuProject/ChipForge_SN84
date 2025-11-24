@@ -586,19 +586,27 @@ class APIClient:
         """Transform EDA server response to expected format"""
         # Extract the final score from the new response format
         final_score = eda_result.get('final_score', {})
-        
+
         # Extract functionality score from verilator results
         verilator_results = eda_result.get('verilator_results', {})
         verilator_success = verilator_results.get('success', False)
         functionality_score = 0.0
-        
+
         if verilator_success:
             verilator_inner_results = verilator_results.get('results', {})
             functionality_score = verilator_inner_results.get('functionality_score', 0.0)
-        
+
+        # Extract gate flags from final_score
+        functional_gate = final_score.get('functional_gate', False)
+        overall_gate = final_score.get('overall_gate', False)
+
         # Check if the submission passed the testbench (based on functional gate)
-        passed_testbench = final_score.get('functional_gate', False) and functionality_score > 0
-        
+        passed_testbench = functional_gate and functionality_score > 0
+
+        # Log gate status
+        if not functional_gate or not overall_gate:
+            logger.warning(f"Submission {submission_id} failed gates - functional_gate: {functional_gate}, overall_gate: {overall_gate}")
+
         return {
             'overall_score': final_score.get('overall', 0.0),
             'functionality_score': final_score.get('func_score', 0.0),
@@ -606,13 +614,15 @@ class APIClient:
             'delay_score': final_score.get('perf_score', 0.0),  # Using perf_score as delay_score
             'power_score': 0.0,  # Power score not provided in new format
             'passed_testbench': passed_testbench,
-            'evaluation_notes': f"EDA evaluation for {submission_id} - Functionality: {functionality_score:.2f}, Overall: {final_score.get('overall', 0.0):.2f}"
+            'functional_gate': functional_gate,
+            'overall_gate': overall_gate,
+            'evaluation_notes': f"EDA evaluation for {submission_id} - Functionality: {functionality_score:.2f}, Overall: {final_score.get('overall', 0.0):.2f}, Gates: func={functional_gate}, overall={overall_gate}"
         }
 
     def _generate_fallback_evaluation(self, submission_id: str) -> Dict:
         """Generate fallback evaluation when EDA server fails - marks as FAILED"""
         logger.warning(f"Marking evaluation as FAILED for {submission_id}")
-        
+
         return {
             'overall_score': 0.0,
             'functionality_score': 0.0,
@@ -620,6 +630,8 @@ class APIClient:
             'delay_score': 0.0,
             'power_score': 0.0,
             'passed_testbench': False,
+            'functional_gate': False,
+            'overall_gate': False,
             'evaluation_notes': f"Evaluation FAILED for {submission_id} - EDA server unavailable or error occurred"
         }
 
@@ -635,9 +647,11 @@ class APIClient:
                 'delay_score': 0.0,
                 'power_score': 0.0,
                 'passed_testbench': False,
+                'functional_gate': False,
+                'overall_gate': False,
                 'evaluation_notes': f"FAILED! Dummy evaluation for {submission_id}, There is an error in evaluation pipeline"
             }
-        
+
         await asyncio.sleep(2)  # Simulate processing time
         return evaluations
     
