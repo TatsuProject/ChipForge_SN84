@@ -611,8 +611,8 @@ class APIClient:
             'overall_score': final_score.get('overall', 0.0),
             'functionality_score': final_score.get('func_score', 0.0),
             'area_score': final_score.get('area_score', 0.0),
-            'delay_score': final_score.get('perf_score', 0.0),  # Using perf_score as delay_score
-            'power_score': 0.0,  # Power score not provided in new format
+            'delay_score': final_score.get('perf_score', 0.0),
+            'power_score': final_score.get('power_score', 0.0),
             'passed_testbench': passed_testbench,
             'functional_gate': functional_gate,
             'overall_gate': overall_gate,
