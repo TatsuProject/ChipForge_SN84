@@ -93,16 +93,55 @@ kill -9 <PID>
 
 #### Miner Responsibilities
 
-- Download challenge
+- Download challenge (use `miner_cli.py download`)
 - Solve it 
-- Submit the solution
+- Submit the solution (use `miner_cli.py submit`)
+
+The miner CLI tool (`python_scripts/miner_cli.py`) provides all the functionality needed for these tasks. See [MINER_CLI_COMMANDS.md](MINER_CLI_COMMANDS.md) for complete documentation.
 
 #### Submitting Solutions
 
+**Using the Miner CLI Tool (Recommended):**
+
+The `miner_cli.py` tool provides a comprehensive command-line interface for miners:
+
 ```bash
-# set wallet and path to zip file in .env file and run this
-./submit_score.sh
+# Check current challenge status and your submissions
+python3 python_scripts/miner_cli.py status
+
+# List all your submissions
+python3 python_scripts/miner_cli.py submissions
+
+# Download challenge information and test cases
+python3 python_scripts/miner_cli.py download
+
+# Submit a solution (with validation)
+python3 python_scripts/miner_cli.py submit solution.zip --check_status
+
+# Dry run (validate without submitting)
+python3 python_scripts/miner_cli.py submit solution.zip --dry_run
 ```
+
+**Using the Shell Script:**
+
+```bash
+# Set wallet and path to zip file in .env file and run this
+./submit_solution.sh
+```
+
+**Direct Python Script:**
+
+You can also use the miner CLI directly with explicit arguments:
+
+```bash
+python3 python_scripts/miner_cli.py submit solution.zip \
+    --wallet.name YOUR_WALLET \
+    --wallet.hotkey YOUR_HOTKEY \
+    --api_url http://your-api-url:8000 \
+    --check_status
+```
+
+For more details, see [MINER_CLI_COMMANDS.md](MINER_CLI_COMMANDS.md).
 
 #### Solution Format
 
@@ -111,6 +150,11 @@ Solutions must be packaged as ZIP files containing:
 - Testbench files (optional)
 - Constraint files (optional)
 - README with design description (optional)
+
+**Important Constraints:**
+- Maximum file size: **10MB**
+- File must be a valid ZIP archive
+- The miner CLI tool automatically validates these requirements before submission
 
 #### Rate Limits
 - Challenge server accepts 5 requests per IP per hour.
@@ -273,9 +317,11 @@ curl http://challenge-server:8000/health
    - Verify hotkey registration on subnet
 
 2. **Submission Upload Failed**
+   - Use `miner_cli.py submit solution.zip --dry_run` to validate before submitting
    - Check ZIP file format and contents
-   - Verify file size limits (typically 10MB)
+   - Verify file size limits (10MB maximum - enforced by miner CLI)
    - Ensure proper authentication headers
+   - Check wallet configuration in `.env` file or command-line arguments
 
 3. **Validator Download Issues**
    - Confirm validator secret configuration
