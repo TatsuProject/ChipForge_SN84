@@ -46,8 +46,9 @@ if [ ! -f "$FILE_TO_SUBMIT" ]; then
 fi
 
 # All checks passed, proceed with submission
-python python_scripts/miner_cli.py submit "$FILE_TO_SUBMIT" \
+python python_scripts/miner_cli.py \
     --wallet.name "$WALLET_NAME" \
     --wallet.hotkey "$MINER_HOTKEY" \
     --api_url "$CHALLENGE_API_URL" \
+    submit "$FILE_TO_SUBMIT" \
     --check_status
