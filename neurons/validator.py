@@ -510,8 +510,19 @@ class ChipForgeValidator:
                                 logger.warning(f"Emissions ban status changed: {self.state.ban_emissions} -> {challenge_info['ban_emissions']}")
                                 self.state.ban_emissions = challenge_info['ban_emissions']
                                 self.state.save_state()
+
+                        # Download new testcases if server signals update
+                        if challenge_info.get('download_new_testcases'):
+                            logger.info(f"Server signaled new testcases available for challenge {challenge_id}, downloading...")
+                            try:
+                                if await self.api_client.download_test_cases(challenge_id):
+                                    logger.info(f"Successfully downloaded new testcases for challenge {challenge_id}")
+                                else:
+                                    logger.warning(f"Failed to download new testcases for challenge {challenge_id}")
+                            except Exception as e:
+                                logger.error(f"Error downloading new testcases: {e}")
                 except Exception as e:
-                    logger.error(f"Error updating baseline score and ban_emissions: {e}")
+                    logger.error(f"Error updating challenge info: {e}")
 
                 self._last_expiration_check[challenge_id] = current_time
             

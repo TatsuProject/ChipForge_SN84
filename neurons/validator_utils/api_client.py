@@ -150,6 +150,10 @@ class APIClient:
                             if challenge['ban_emissions']:
                                 logger.warning(f"Challenge {challenge_id} has EMISSIONS BANNED")
 
+                        # Extract download_new_testcases flag
+                        if challenge.get('download_new_testcases'):
+                            result['download_new_testcases'] = True
+
                         return result
                 return None
         except Exception as e:
