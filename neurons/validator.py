@@ -35,13 +35,15 @@ class ChipForgeValidator:
     """ChipForge Subnet Validator with modular architecture"""
     
     
-    def set_weights_with_ban_check(self, weights: dict, context: str = ""):
-        """Set weights with ban_emissions check"""
+    def set_weights_with_ban_check(self, context: str = "", winner_hotkey: str = None):
+        """Set weights with ban_emissions check. Pass winner_hotkey for emission-split winner rewards."""
         if self.state.ban_emissions:
             logger.warning(f"EMISSIONS BANNED by challenge server - burning emissions ({context})")
             self.weight_manager.set_burn_weights()
+        elif winner_hotkey:
+            self.weight_manager.set_winner_weights(winner_hotkey, self.emission_manager.miner_emission_percentage)
         else:
-            self.weight_manager.set_weights(weights)
+            self.weight_manager.set_burn_weights()
     
     def __init__(self, config):
         self.config = config
@@ -52,7 +54,9 @@ class ChipForgeValidator:
         
         # Initialize components
         self.state = ValidatorState()
-        self.emission_manager = EmissionManager()
+        self.emission_manager = EmissionManager(
+            miner_emission_percentage=getattr(config, 'miner_emission_percentage', 100.0)
+        )
         self.weight_manager = WeightManager(
             self.wallet, self.subtensor, self.metagraph, self.config
         )
@@ -294,14 +298,8 @@ class ChipForgeValidator:
                                 
                                 reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey, current_best_score)
                                 if reward_hotkey:
-                                    uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
-                                    if uid is not None:
-                                        weights = {reward_hotkey: 1.0}
-                                        logger.info(f"Server unreachable - using cached winner {reward_hotkey[:12]}... (reward period active)")
-                                        self.set_weights_with_ban_check(weights, "server unreachable - cached winner")
-                                    else:
-                                        logger.info("Server unreachable - winner not on subnet, burning emissions")
-                                        self.weight_manager.set_burn_weights()
+                                    logger.info(f"Server unreachable - using cached winner {reward_hotkey[:12]}... (reward period active)")
+                                    self.set_weights_with_ban_check(context="server unreachable - cached winner", winner_hotkey=reward_hotkey)
                                 else:
                                     logger.info("Server unreachable - no qualified winner, burning emissions")
                                     self.weight_manager.set_burn_weights()
@@ -344,18 +342,12 @@ class ChipForgeValidator:
                             
                             reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey, current_best_score)
                             if reward_hotkey:
-                                uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
-                                if uid is not None:
-                                    weights = {reward_hotkey: 1.0}
-                                    logger.info(f"Grace period: Using cached winner {reward_hotkey[:12]}... (reward period active)")
-                                    self.set_weights_with_ban_check(weights, "grace period - cached winner")
-                                else:
-                                    logger.info("Grace period: Winner not on subnet - burning emissions")
-                                    self.weight_manager.set_burn_weights()
+                                logger.info(f"Grace period: Using cached winner {reward_hotkey[:12]}... (reward period active)")
+                                self.set_weights_with_ban_check(context="grace period - cached winner", winner_hotkey=reward_hotkey)
                             else:
                                 logger.info("Grace period: No qualified winner - burning emissions")
                                 self.weight_manager.set_burn_weights()
-                        
+
                         self.next_batch_check = datetime.now(timezone.utc) + timedelta(seconds=30)
                         return
                     else:
@@ -379,14 +371,8 @@ class ChipForgeValidator:
                                 
                                 reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey, current_best_score)
                                 if reward_hotkey:
-                                    uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
-                                    if uid is not None:
-                                        weights = {reward_hotkey: 1.0}
-                                        logger.info(f"Grace period: Using cached winner {reward_hotkey[:12]}... (reward period active)")
-                                        self.set_weights_with_ban_check(weights, "grace period - cached winner")
-                                    else:
-                                        logger.info("Grace period: Winner not on subnet - burning emissions")
-                                        self.weight_manager.set_burn_weights()
+                                    logger.info(f"Grace period: Using cached winner {reward_hotkey[:12]}... (reward period active)")
+                                    self.set_weights_with_ban_check(context="grace period - cached winner", winner_hotkey=reward_hotkey)
                                 else:
                                     logger.info("Grace period: Reward period expired - burning emissions")
                                     self.weight_manager.set_burn_weights()
@@ -437,14 +423,8 @@ class ChipForgeValidator:
                     reward_hotkey = self.emission_manager.get_reward_hotkey()
 
                     if reward_hotkey:
-                        uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
-                        if uid is not None:
-                            weights = {reward_hotkey: 1.0}
-                            logger.info(f"No active challenge, but rewarding winner {reward_hotkey[:12]}... (emission manager active)")
-                            self.set_weights_with_ban_check(weights, "no active challenge - emission manager winner")
-                        else:
-                            logger.info("No active challenge, winner not on subnet - burning emissions")
-                            self.weight_manager.set_burn_weights()
+                        logger.info(f"No active challenge, but rewarding winner {reward_hotkey[:12]}... (emission manager active)")
+                        self.set_weights_with_ban_check(context="no active challenge - emission manager winner", winner_hotkey=reward_hotkey)
                     else:
                         logger.info("No active challenge, no winner reward period - burning emissions")
                         self.weight_manager.set_burn_weights()
@@ -621,14 +601,8 @@ class ChipForgeValidator:
 
                     reward_hotkey = self.emission_manager.get_reward_hotkey(current_best_hotkey, current_best_score)
                     if reward_hotkey:
-                        uid = self.weight_manager.get_hotkey_uid(reward_hotkey)
-                        if uid is not None:
-                            weights = {reward_hotkey: 1.0}
-                            logger.info(f"Setting current challenge winner weights: {reward_hotkey[:12]}...")
-                            self.set_weights_with_ban_check(weights, "current challenge winner")
-                        else:
-                            logger.info("Current challenge winner not on subnet - burning emissions")
-                            self.weight_manager.set_burn_weights()
+                        logger.info(f"Setting current challenge winner weights: {reward_hotkey[:12]}...")
+                        self.set_weights_with_ban_check(context="current challenge winner", winner_hotkey=reward_hotkey)
                     else:
                         logger.info("No qualified winner for rewards - burning emissions")
                         self.weight_manager.set_burn_weights()
@@ -660,14 +634,8 @@ class ChipForgeValidator:
                 # Fallback
                 if hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
                     current_winner = self.state.current_challenge_best[0]
-                    uid = self.weight_manager.get_hotkey_uid(current_winner)
-                    if uid is not None:
-                        weights = {current_winner: 1.0}
-                        logger.info(f"Batch processing failed, using current challenge winner {current_winner[:12]}...")
-                        self.set_weights_with_ban_check(weights, "current challenge winner")
-                    else:
-                        logger.info("Batch processing failed, current winner not on subnet - burning emissions")
-                        self.weight_manager.set_burn_weights()
+                    logger.info(f"Batch processing failed, using current challenge winner {current_winner[:12]}...")
+                    self.set_weights_with_ban_check(context="current challenge winner - batch failed", winner_hotkey=current_winner)
                 else:
                     logger.info("Batch processing failed, no current winner - burning emissions")
                     self.weight_manager.set_burn_weights()
@@ -692,13 +660,8 @@ class ChipForgeValidator:
                     self.weight_manager.set_burn_weights()
                 elif hasattr(self.state, 'current_challenge_best') and self.state.current_challenge_best[0]:
                     current_winner = self.state.current_challenge_best[0]
-                    uid = self.weight_manager.get_hotkey_uid(current_winner)
-                    if uid is not None:
-                        weights = {current_winner: 1.0}
-                        logger.info(f"Error fallback: Using current challenge winner {current_winner[:12]}...")
-                        self.set_weights_with_ban_check(weights, "current challenge winner")
-                    else:
-                        self.weight_manager.set_burn_weights()
+                    logger.info(f"Error fallback: Using current challenge winner {current_winner[:12]}...")
+                    self.set_weights_with_ban_check(context="current challenge winner - error fallback", winner_hotkey=current_winner)
                 else:
                     self.weight_manager.set_burn_weights()
 
@@ -752,7 +715,9 @@ def get_config():
                        help="Validator secret key for API authentication")
     parser.add_argument("--netuid", type=int, required=True,
                        help="Subnet netuid")
-    
+    parser.add_argument("--miner_emission_percentage", type=float, default=10.0,
+                       help="Percentage of emissions given to the winner miner (0-100). Remainder is burned. Default: 10")
+
     # Parse arguments and create config
     config = bt.config(parser)  # Pass parser, not args
     

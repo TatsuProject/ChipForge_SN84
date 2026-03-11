@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 class EmissionManager:
     """Manages emission phases based on challenge lifecycle"""
     
-    def __init__(self, config_file: str = "emission_config.json"):
+    def __init__(self, config_file: str = "emission_config.json", miner_emission_percentage: float = 100.0):
         self.config_file = config_file
-        self.load_config()
+        self.load_config(miner_emission_percentage=miner_emission_percentage)
         
         # State tracking with persistence
         self.subnet_start_time = None
@@ -34,20 +34,24 @@ class EmissionManager:
 
         self.load_state()
     
-    def load_config(self):
+    def load_config(self, miner_emission_percentage: float = 100.0):
         """Load timing configuration from env or defaults"""
         # Load local fallback value
         self.local_winner_reward_hours = float(os.getenv('TOTAL_HOURS_FOR_WINNER_REWARD', '0.5'))
-        
+
         # Active value (can be updated from challenge server)
         self.total_hours_for_winner_reward = self.local_winner_reward_hours
         self.burn_after_winner_days = float(os.getenv('BURN_AFTER_WINNER_DAYS', '0'))
-        
+
+        # Percentage of emissions given to the winner miner (0-100); remainder is burned.
+        # Value comes from --miner_emission_percentage CLI arg (hardcoded default: 100).
+        self.miner_emission_percentage = max(0.0, min(100.0, miner_emission_percentage))
+
         # Convert hours to days for internal consistency
         self.initial_burn_days = self.total_hours_for_winner_reward / 24
         self.winner_reward_days = self.total_hours_for_winner_reward / 24
-        
-        logger.info(f"Emission config: Local fallback winner reward={self.local_winner_reward_hours}h, Active={self.total_hours_for_winner_reward}h")
+
+        logger.info(f"Emission config: Local fallback winner reward={self.local_winner_reward_hours}h, Active={self.total_hours_for_winner_reward}h, Miner emission={self.miner_emission_percentage}%")
 
     def update_winner_reward_hours_from_server(self, winner_reward_hours: Optional[float]):
         """
