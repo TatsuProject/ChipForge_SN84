@@ -483,7 +483,7 @@ class APIClient:
         
         # Create semaphore to limit concurrent requests to EDA server
         semaphore = asyncio.Semaphore(8)  # Limit to 8 concurrent requests
-        eda_timeout_seconds = 2700
+        eda_timeout_seconds = 2640
 
         async def evaluate_single_submission(submission_id: str, submission_data: bytes) -> tuple[str, Dict]:
             """Evaluate a single submission with semaphore control"""
