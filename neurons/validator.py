@@ -75,6 +75,7 @@ class ChipForgeValidator:
         # Batch timing
         self.next_batch_check = datetime.now(timezone.utc)
         self.consecutive_errors = 0
+        self.batch_processing_timeout = 2700  # seconds
         
         logger.info(f"ChipForge Validator initialized")
         logger.info(f"Validator hotkey: {self.wallet.hotkey.ss58_address}")
@@ -615,8 +616,8 @@ class ChipForgeValidator:
             logger.info(f"Starting to process batch {batch_id}")
             try:
                 success = await asyncio.wait_for(
-                    self.batch_processor.process_batch(challenge_id, batch), 
-                    timeout=2700
+                    self.batch_processor.process_batch(challenge_id, batch),
+                    timeout=self.batch_processing_timeout
                 )
                 logger.info(f"Batch processing completed with success: {success}")
             except asyncio.TimeoutError:

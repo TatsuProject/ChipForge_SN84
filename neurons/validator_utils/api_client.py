@@ -11,6 +11,7 @@ import aiofiles
 import logging
 import tempfile
 import os
+import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -482,20 +483,21 @@ class APIClient:
         
         # Create semaphore to limit concurrent requests to EDA server
         semaphore = asyncio.Semaphore(8)  # Limit to 8 concurrent requests
-        
+        eda_timeout_seconds = 2700
+
         async def evaluate_single_submission(submission_id: str, submission_data: bytes) -> tuple[str, Dict]:
             """Evaluate a single submission with semaphore control"""
             async with semaphore:  # This limits concurrent requests
                 try:
                     logger.info(f"Evaluating submission {submission_id} with EDA server and test cases")
-                    
+
                     # Create temporary files for submission
                     with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as design_temp:
                         design_temp.write(submission_data)
                         design_temp.flush()
-                        
+
                         # Create timeout for each individual submission
-                        timeout = aiohttp.ClientTimeout(total=2700)  # 45 minutes per submission
+                        timeout = aiohttp.ClientTimeout(total=eda_timeout_seconds)
                         
                         async with aiohttp.ClientSession(timeout=timeout) as session:
                             # Prepare multipart form data
@@ -543,7 +545,10 @@ class APIClient:
                                         
                             except asyncio.TimeoutError:
                                 logger.error(f"Timeout evaluating {submission_id} with EDA server")
-                                evaluation_result = self._generate_fallback_evaluation(submission_id)
+                                evaluation_result = self._generate_fallback_evaluation(
+                                    submission_id,
+                                    evaluation_details={'status': 'timeout', 'error': f'EDA server evaluation timed out after {eda_timeout_seconds} seconds'}
+                                )
                             except Exception as eval_error:
                                 logger.error(f"Exception during EDA evaluation for {submission_id}: {eval_error}")
                                 evaluation_result = self._generate_fallback_evaluation(submission_id)
@@ -611,6 +616,39 @@ class APIClient:
         if not functional_gate or not overall_gate:
             logger.warning(f"Submission {submission_id} failed gates - functional_gate: {functional_gate}, overall_gate: {overall_gate}")
 
+        # Build structured evaluation_details for miners to diagnose their submission
+        openlane_results = eda_result.get('openlane_results', {})
+        details: Dict[str, Any] = {}
+
+        if verilator_success:
+            inner = verilator_results.get('results', {})
+            details['verilator'] = {
+                'ipc': inner.get('ipc'),
+                'total_instructions': inner.get('total_instructions'),
+                'instructions_passed': inner.get('instructions_passed'),
+            }
+        else:
+            details['verilator_error'] = verilator_results.get('error_message', '')
+            raw_log = verilator_results.get('evaluator_log', '')
+            try:
+                log_data = json.loads(raw_log)
+                details['verilator_build_log'] = log_data.get('log', raw_log)
+            except Exception:
+                details['verilator_build_log'] = raw_log
+
+        openlane_success = openlane_results.get('success', False)
+        if openlane_success:
+            inner = openlane_results.get('results', {})
+            details['openlane'] = {
+                'area_um2': inner.get('area_um2'),
+                'fmax_mhz': inner.get('fmax_mhz'),
+                'wns_ns': inner.get('wns_ns'),
+                'sdc_period_ns': inner.get('sdc_period_ns'),
+            }
+        else:
+            details['openlane_error'] = openlane_results.get('error_message', '')
+            details['openlane_log'] = openlane_results.get('logs', '')
+
         return {
             'overall_score': final_score.get('overall', 0.0),
             'functionality_score': final_score.get('func_score', 0.0),
@@ -620,12 +658,17 @@ class APIClient:
             'passed_testbench': passed_testbench,
             'functional_gate': functional_gate,
             'overall_gate': overall_gate,
-            'evaluation_notes': f"EDA evaluation for {submission_id} - Functionality: {functionality_score:.2f}, Overall: {final_score.get('overall', 0.0):.2f}, Gates: func={functional_gate}, overall={overall_gate}"
+            'timeout_occurred': False,
+            'evaluation_notes': f"EDA evaluation for {submission_id} - Functionality: {functionality_score:.2f}, Overall: {final_score.get('overall', 0.0):.2f}, Gates: func={functional_gate}, overall={overall_gate}",
+            'evaluation_details': json.dumps(details),
         }
 
-    def _generate_fallback_evaluation(self, submission_id: str) -> Dict:
+    def _generate_fallback_evaluation(self, submission_id: str, evaluation_details: Optional[Dict] = None) -> Dict:
         """Generate fallback evaluation when EDA server fails - marks as FAILED"""
         logger.warning(f"Marking evaluation as FAILED for {submission_id}")
+
+        if evaluation_details is None:
+            evaluation_details = {'status': 'failed', 'error': 'EDA server unavailable or error occurred'}
 
         return {
             'overall_score': 0.0,
@@ -636,7 +679,25 @@ class APIClient:
             'passed_testbench': False,
             'functional_gate': False,
             'overall_gate': False,
-            'evaluation_notes': f"Evaluation FAILED for {submission_id} - EDA server unavailable or error occurred"
+            'timeout_occurred': False,
+            'evaluation_notes': f"Evaluation FAILED for {submission_id} - EDA server unavailable or error occurred",
+            'evaluation_details': json.dumps(evaluation_details),
+        }
+
+    def build_timeout_evaluation(self, submission_id: str, timeout_seconds: int) -> Dict:
+        """Build a zero-score evaluation dict for a submission that timed out at the batch level"""
+        return {
+            'overall_score': 0.0,
+            'functionality_score': 0.0,
+            'area_score': 0.0,
+            'delay_score': 0.0,
+            'power_score': 0.0,
+            'passed_testbench': False,
+            'functional_gate': False,
+            'overall_gate': False,
+            'timeout_occurred': True,
+            'evaluation_notes': f"Evaluation timed out for {submission_id} - batch processing exceeded {timeout_seconds}s time limit",
+            'evaluation_details': json.dumps({'status': 'batch_timeout', 'error': f'Batch processing timed out after {timeout_seconds} seconds'}),
         }
 
     async def _dummy_evaluate_submissions(self, submissions: Dict[str, bytes]) -> Dict[str, Dict]:
@@ -714,6 +775,12 @@ class APIClient:
                     'X-Validator-Secret': self.validator_secret
                 }
 
+                # Truncate evaluation_details to 16KB to keep form data size bounded
+                _EVAL_DETAILS_LIMIT = 16384
+                evaluation_details = evaluation.get('evaluation_details', '')
+                if len(evaluation_details) > _EVAL_DETAILS_LIMIT:
+                    evaluation_details = evaluation_details[:_EVAL_DETAILS_LIMIT] + '...[truncated]'
+
                 # Evaluation data as FORM DATA (not JSON)
                 form_data = {
                     'overall_score': str(evaluation['overall_score']),
@@ -721,8 +788,10 @@ class APIClient:
                     'area_score': str(evaluation['area_score']),
                     'delay_score': str(evaluation['delay_score']),
                     'power_score': str(evaluation['power_score']),
-                    'passed_testbench': str(evaluation['passed_testbench']).lower(),  # boolean as string
-                    'evaluation_notes': evaluation.get('evaluation_notes', '')
+                    'passed_testbench': str(evaluation['passed_testbench']).lower(),
+                    'timeout_occurred': str(evaluation.get('timeout_occurred', False)).lower(),
+                    'evaluation_notes': evaluation.get('evaluation_notes', ''),
+                    'evaluation_details': evaluation_details,
                 }
 
                 if attempt == 0:
