@@ -869,7 +869,7 @@ class APIClient:
             
             logger.info(f"Requesting test cases from: {url}")
             
-            async with self.session.get(url, headers=headers, params=params, timeout=60) as response:
+            async with self.session.get(url, headers=headers, params=params, timeout=240) as response:
                 if response.status == 200:
                     content = await response.read()
                     logger.info(f"Downloaded test cases: {len(content)} bytes")
