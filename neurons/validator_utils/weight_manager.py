@@ -37,7 +37,8 @@ class WeightManager:
             
             uids_tensor = torch.tensor(uids, dtype=torch.int64)
             weights_tensor = torch.tensor(weights, dtype=torch.float32)
-            
+
+            logger.info("Calling subtensor.set_weights for burn weights (wait_for_inclusion=True)")
             success = self.subtensor.set_weights(
                 wallet=self.wallet,
                 netuid=self.config.netuid,
@@ -45,7 +46,8 @@ class WeightManager:
                 weights=weights_tensor,
                 wait_for_inclusion=True,
             )
-            
+            logger.info(f"subtensor.set_weights returned for burn weights: success={success}")
+
             if success:
                 logger.info("Successfully set burn weights (uid 0 = 1.0, others = 0.0)")
             else:
@@ -79,6 +81,7 @@ class WeightManager:
             uids_tensor = torch.tensor(uids, dtype=torch.int64)
             weights_tensor = torch.tensor(weights, dtype=torch.float32)
 
+            logger.info(f"Calling subtensor.set_weights for winner {winner_hotkey[:12]}... (wait_for_inclusion=True)")
             success = self.subtensor.set_weights(
                 wallet=self.wallet,
                 netuid=self.config.netuid,
@@ -86,6 +89,7 @@ class WeightManager:
                 weights=weights_tensor,
                 wait_for_inclusion=True,
             )
+            logger.info(f"subtensor.set_weights returned for winner weights: success={success}")
 
             if success:
                 logger.info(

@@ -33,8 +33,25 @@ logger = logging.getLogger(__name__)
 
 class ChipForgeValidator:
     """ChipForge Subnet Validator with modular architecture"""
-    
-    
+
+    def _update_batch_window_config(self, challenge_info: dict) -> None:
+        """Persist batch download/evaluation windows from challenge info when present and changed"""
+        if not challenge_info:
+            return
+        changed = False
+        new_dl = challenge_info.get('batch_download_window_seconds')
+        new_eval = challenge_info.get('batch_evaluation_window_seconds')
+        if new_dl is not None and new_dl != self.state.batch_download_window_seconds:
+            logger.info(f"batch_download_window_seconds updated: {self.state.batch_download_window_seconds} -> {new_dl}")
+            self.state.batch_download_window_seconds = new_dl
+            changed = True
+        if new_eval is not None and new_eval != self.state.batch_evaluation_window_seconds:
+            logger.info(f"batch_evaluation_window_seconds updated: {self.state.batch_evaluation_window_seconds} -> {new_eval}")
+            self.state.batch_evaluation_window_seconds = new_eval
+            changed = True
+        if changed:
+            self.state.save_state()
+
     def set_weights_with_ban_check(self, context: str = "", winner_hotkey: str = None):
         """Set weights with ban_emissions check. Pass winner_hotkey for emission-split winner rewards."""
         if self.state.ban_emissions:
@@ -82,7 +99,7 @@ class ChipForgeValidator:
     
     def initialize_components(self):
         """Initialize components that require the HTTP session"""
-        self.api_client = APIClient(self.config, self.wallet, self.session)
+        self.api_client = APIClient(self.config, self.wallet, self.session, state=self.state)
         self.batch_processor = BatchProcessor(
             self.api_client, self.state, self.emission_manager, self.weight_manager
         )
@@ -107,6 +124,8 @@ class ChipForgeValidator:
                         self.state.winner_baseline_score = challenge_info['winner_baseline_score']
                         logger.info(f"Crash recovery: Loaded baseline score {self.state.winner_baseline_score}")
                         self.state.save_state()
+                    if challenge_info:
+                        self._update_batch_window_config(challenge_info)
                 except Exception as e:
                     logger.error(f"Error fetching baseline score during crash recovery: {e}")
 
@@ -492,6 +511,9 @@ class ChipForgeValidator:
                                 self.state.ban_emissions = challenge_info['ban_emissions']
                                 self.state.save_state()
 
+                        # Update batch window configuration
+                        self._update_batch_window_config(challenge_info)
+
                         # Download new testcases if server signals update
                         if challenge_info.get('download_new_testcases'):
                             logger.info(f"Server signaled new testcases available for challenge {challenge_id}, downloading...")
@@ -532,6 +554,7 @@ class ChipForgeValidator:
                             logger.info(f"Updated winner baseline score: {self.state.winner_baseline_score}")
                         else:
                             logger.warning(f"Challenge info missing winner_baseline_score, keeping previous: {self.state.winner_baseline_score}")
+                        self._update_batch_window_config(challenge_info)
                     else:
                         logger.warning(f"Failed to fetch challenge info for {challenge_id}")
                 except Exception as e:
@@ -614,15 +637,38 @@ class ChipForgeValidator:
 
             # Process the batch
             logger.info(f"Starting to process batch {batch_id}")
+            # Compute batch processing timeout: (server download + evaluation window) - 45s safety buffer
+            # so we finish before the challenge server closes the batch evaluation window.
+            _BATCH_SAFETY_BUFFER = 45
+            dl_window = self.state.batch_download_window_seconds
+            eval_window = self.state.batch_evaluation_window_seconds
+            if dl_window > 0 and eval_window > 0:
+                batch_timeout = (dl_window + eval_window) - _BATCH_SAFETY_BUFFER
+                logger.info(f"Batch timeout derived from server config: {batch_timeout}s (download={dl_window}s + evaluation={eval_window}s - buffer={_BATCH_SAFETY_BUFFER}s)")
+            else:
+                batch_timeout = self.batch_processing_timeout
+                logger.info(f"Batch timeout using hardcoded fallback: {batch_timeout}s")
             try:
                 success = await asyncio.wait_for(
                     self.batch_processor.process_batch(challenge_id, batch),
-                    timeout=self.batch_processing_timeout
+                    timeout=batch_timeout
                 )
                 logger.info(f"Batch processing completed with success: {success}")
             except asyncio.TimeoutError:
                 logger.error(f"Batch processing timed out for batch {batch_id}")
                 success = False
+                # Submit 0 scores with timeout_occurred=true so miners get timeout feedback;
+                # the challenge server uses this flag to allow a later successful submission to overwrite.
+                try:
+                    timeout_evaluations = {
+                        s['submission_id']: self.api_client.build_timeout_evaluation(s['submission_id'], batch_timeout)
+                        for s in batch.get('submissions', [])
+                    }
+                    if timeout_evaluations:
+                        logger.info(f"Submitting timeout evaluations for {len(timeout_evaluations)} submissions in timed-out batch {batch_id}")
+                        await self.api_client.submit_all_evaluations(challenge_id, timeout_evaluations)
+                except Exception as timeout_submit_err:
+                    logger.error(f"Failed to submit timeout evaluations for batch {batch_id}: {timeout_submit_err}")
             except Exception as e:
                 logger.error(f"Exception during batch processing: {e}")
                 logger.error(f"Traceback: {traceback.format_exc()}")

@@ -26,10 +26,11 @@ logger = logging.getLogger(__name__)
 class APIClient:
     """Handles API communications for the validator"""
     
-    def __init__(self, config, wallet, session: aiohttp.ClientSession):
+    def __init__(self, config, wallet, session: aiohttp.ClientSession, state=None):
         self.config = config
         self.wallet = wallet
         self.session = session
+        self.state = state  # ValidatorState for reading dynamic timeout windows
         
         # Challenge server configuration
         self.api_url = getattr(config, 'challenge_api_url', 'http://localhost:8000')
@@ -154,6 +155,12 @@ class APIClient:
                         # Extract download_new_testcases flag
                         if challenge.get('download_new_testcases'):
                             result['download_new_testcases'] = True
+
+                        # Extract batch window configuration
+                        if 'batch_download_window_seconds' in challenge:
+                            result['batch_download_window_seconds'] = challenge['batch_download_window_seconds']
+                        if 'batch_evaluation_window_seconds' in challenge:
+                            result['batch_evaluation_window_seconds'] = challenge['batch_evaluation_window_seconds']
 
                         return result
                 return None
@@ -483,7 +490,22 @@ class APIClient:
         
         # Create semaphore to limit concurrent requests to EDA server
         semaphore = asyncio.Semaphore(8)  # Limit to 8 concurrent requests
-        eda_timeout_seconds = 2640
+
+        # EDA timeout = batch_processing_timeout - 120s.
+        # batch_processing_timeout = (download + evaluation windows from server) - 45s.
+        # Fall back to hardcoded 2640s if the server has not provided windows yet.
+        _BATCH_SAFETY_BUFFER = 45
+        _EDA_SAFETY_BUFFER = 120
+        _EDA_TIMEOUT_FALLBACK = 2640
+        dl_window = getattr(self.state, 'batch_download_window_seconds', 0) if self.state else 0
+        eval_window = getattr(self.state, 'batch_evaluation_window_seconds', 0) if self.state else 0
+        if dl_window > 0 and eval_window > 0:
+            batch_processing_timeout = (dl_window + eval_window) - _BATCH_SAFETY_BUFFER
+            eda_timeout_seconds = batch_processing_timeout - _EDA_SAFETY_BUFFER
+            logger.info(f"EDA timeout derived from server config: {eda_timeout_seconds}s (batch_timeout={batch_processing_timeout}s - eda_buffer={_EDA_SAFETY_BUFFER}s)")
+        else:
+            eda_timeout_seconds = _EDA_TIMEOUT_FALLBACK
+            logger.info(f"EDA timeout using hardcoded fallback: {eda_timeout_seconds}s")
 
         async def evaluate_single_submission(submission_id: str, submission_data: bytes) -> tuple[str, Dict]:
             """Evaluate a single submission with semaphore control"""
@@ -547,7 +569,8 @@ class APIClient:
                                 logger.error(f"Timeout evaluating {submission_id} with EDA server")
                                 evaluation_result = self._generate_fallback_evaluation(
                                     submission_id,
-                                    evaluation_details={'status': 'timeout', 'error': f'EDA server evaluation timed out after {eda_timeout_seconds} seconds'}
+                                    evaluation_details={'status': 'timeout', 'error': f'EDA server evaluation timed out after {eda_timeout_seconds} seconds'},
+                                    timeout_occurred=True,
                                 )
                             except Exception as eval_error:
                                 logger.error(f"Exception during EDA evaluation for {submission_id}: {eval_error}")
@@ -663,7 +686,7 @@ class APIClient:
             'evaluation_details': json.dumps(details),
         }
 
-    def _generate_fallback_evaluation(self, submission_id: str, evaluation_details: Optional[Dict] = None) -> Dict:
+    def _generate_fallback_evaluation(self, submission_id: str, evaluation_details: Optional[Dict] = None, timeout_occurred: bool = False) -> Dict:
         """Generate fallback evaluation when EDA server fails - marks as FAILED"""
         logger.warning(f"Marking evaluation as FAILED for {submission_id}")
 
@@ -679,7 +702,7 @@ class APIClient:
             'passed_testbench': False,
             'functional_gate': False,
             'overall_gate': False,
-            'timeout_occurred': False,
+            'timeout_occurred': timeout_occurred,
             'evaluation_notes': f"Evaluation FAILED for {submission_id} - EDA server unavailable or error occurred",
             'evaluation_details': json.dumps(evaluation_details),
         }

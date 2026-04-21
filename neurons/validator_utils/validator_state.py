@@ -32,6 +32,8 @@ class ValidatorState:
         self.current_challenge_best_timestamp: Optional[datetime] = None  # When current best was found
         self.winner_baseline_score: float = 0.0  # Baseline score for winner validation
         self.ban_emissions: bool = False  # Emergency emissions ban flag
+        self.batch_download_window_seconds: int = 0  # 0 means use hardcoded fallback
+        self.batch_evaluation_window_seconds: int = 0  # 0 means use hardcoded fallback
 
         self.load_state()
     
@@ -62,6 +64,8 @@ class ValidatorState:
 
                     self.winner_baseline_score = data.get('winner_baseline_score', 0.0)
                     self.ban_emissions = data.get('ban_emissions', False)
+                    self.batch_download_window_seconds = data.get('batch_download_window_seconds', 0)
+                    self.batch_evaluation_window_seconds = data.get('batch_evaluation_window_seconds', 0)
 
                 logger.info(f"Loaded validator state: batch={self.current_batch_id}, challenge={self.last_challenge_id}, baseline_score={self.winner_baseline_score}, ban_emissions={self.ban_emissions}")
                     
@@ -84,6 +88,8 @@ class ValidatorState:
                 'current_challenge_best_timestamp': self.current_challenge_best_timestamp.isoformat() if self.current_challenge_best_timestamp else None,
                 'winner_baseline_score': self.winner_baseline_score,
                 'ban_emissions': self.ban_emissions,
+                'batch_download_window_seconds': self.batch_download_window_seconds,
+                'batch_evaluation_window_seconds': self.batch_evaluation_window_seconds,
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }
             with open(self.state_file, 'w') as f:

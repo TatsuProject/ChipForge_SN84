@@ -123,6 +123,21 @@ class BatchProcessor:
                         logger.info(f"Using baseline score: {fresh_baseline}")
                 else:
                     logger.warning(f"Could not fetch fresh baseline, using cached: {self.state.winner_baseline_score}")
+
+                # Refresh batch window config so the EDA timeout used for this batch matches the server
+                if challenge_info:
+                    new_dl = challenge_info.get('batch_download_window_seconds')
+                    new_eval = challenge_info.get('batch_evaluation_window_seconds')
+                    ws_changed = False
+                    if new_dl is not None and new_dl != self.state.batch_download_window_seconds:
+                        self.state.batch_download_window_seconds = new_dl
+                        ws_changed = True
+                    if new_eval is not None and new_eval != self.state.batch_evaluation_window_seconds:
+                        self.state.batch_evaluation_window_seconds = new_eval
+                        ws_changed = True
+                    if ws_changed:
+                        logger.info(f"Batch windows refreshed: download={self.state.batch_download_window_seconds}s, evaluation={self.state.batch_evaluation_window_seconds}s")
+                        self.state.save_state()
             except Exception as e:
                 logger.error(f"Error fetching fresh baseline: {e}, using cached: {self.state.winner_baseline_score}")
 
