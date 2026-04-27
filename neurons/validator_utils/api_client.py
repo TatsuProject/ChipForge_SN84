@@ -812,6 +812,8 @@ class APIClient:
                     'delay_score': str(evaluation['delay_score']),
                     'power_score': str(evaluation['power_score']),
                     'passed_testbench': str(evaluation['passed_testbench']).lower(),
+                    'functional_gate': str(evaluation.get('functional_gate', False)).lower(),
+                    'overall_gate': str(evaluation.get('overall_gate', False)).lower(),
                     'timeout_occurred': str(evaluation.get('timeout_occurred', False)).lower(),
                     'evaluation_notes': evaluation.get('evaluation_notes', ''),
                     'evaluation_details': evaluation_details,
@@ -867,6 +869,42 @@ class APIClient:
 
         logger.error(f"Failed to submit evaluation for {submission_id} after {max_retries} attempts")
         return False
+
+    async def get_banned_coldkeys(self, challenge_id: str) -> Optional[Dict]:
+        """Fetch banned coldkeys (permanent + this challenge's scoped bans) from the server.
+
+        Returns the parsed JSON response on success, or None on failure. Caller
+        should fall back to cached state when this returns None.
+        """
+        try:
+            url = f"{self.api_url}/api/v1/challenges/{challenge_id}/banned_coldkeys"
+
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            message = f"{self.validator_hotkey}{timestamp}"
+            signature = self.create_signature(message)
+
+            params = {
+                'validator_hotkey': self.validator_hotkey,
+                'signature': signature,
+                'timestamp': timestamp,
+            }
+            headers = {
+                'X-Validator-Secret': self.validator_secret,
+            }
+
+            async with self.session.get(url, headers=headers, params=params, timeout=15) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    count = data.get('count', len(data.get('bans', [])))
+                    logger.info(f"Fetched {count} banned coldkeys for {challenge_id}")
+                    return data
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Failed to fetch banned coldkeys: {response.status} - {error_text}")
+                    return None
+        except Exception as e:
+            logger.error(f"Error fetching banned coldkeys for {challenge_id}: {e}")
+            return None
 
     async def download_test_cases(self, challenge_id: str) -> bool:
         """Download and extract test cases for a challenge"""

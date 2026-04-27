@@ -165,6 +165,11 @@ cython_debug/
 
 # Ignore all contents of the logs folder
 logs/*
+logs/
+*.log
+validator.log
+nohup.out
+.claude/
 
 # Exclude the logs folder itself from being ignored
 # !logs/.keep
@@ -175,4 +180,5 @@ solution_files/
 validator_data/
 emission_state.json
 validator_state.json
+banned_coldkeys.json
 watchdog.py

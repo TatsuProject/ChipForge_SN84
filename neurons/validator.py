@@ -23,7 +23,8 @@ from validator_utils import (
     WeightManager,
     APIClient,
     MinerCommunications,
-    setup_validator_logging
+    setup_validator_logging,
+    BannedColdkeysManager,
 )
 
 # Configure logging with daily rotation
@@ -33,6 +34,31 @@ logger = logging.getLogger(__name__)
 
 class ChipForgeValidator:
     """ChipForge Subnet Validator with modular architecture"""
+
+    async def sync_banned_coldkeys(self, challenge_id: str) -> None:
+        """Fetch banned coldkeys from server and update local cache.
+
+        On failure, the cached state on disk is retained so a transient outage
+        does not wipe the ban list.
+        """
+        if not challenge_id:
+            return
+        try:
+            response = await self.api_client.get_banned_coldkeys(challenge_id)
+            if response is not None:
+                self.banned_coldkeys.update_from_response(challenge_id, response)
+            else:
+                age = self.banned_coldkeys.last_sync_age_seconds(challenge_id)
+                if age is None:
+                    logger.warning(
+                        f"Banned coldkeys sync failed for {challenge_id} and no cache exists - proceeding with empty ban list"
+                    )
+                else:
+                    logger.warning(
+                        f"Banned coldkeys sync failed for {challenge_id} - using cached list (age: {age/60:.1f} min)"
+                    )
+        except Exception as e:
+            logger.error(f"Unexpected error during banned coldkeys sync: {e}")
 
     def _update_batch_window_config(self, challenge_info: dict) -> None:
         """Persist batch download/evaluation windows from challenge info when present and changed"""
@@ -52,15 +78,24 @@ class ChipForgeValidator:
         if changed:
             self.state.save_state()
 
+    def _active_banned_coldkeys(self):
+        """Return the set of banned coldkeys to enforce for this weight cycle."""
+        return self.banned_coldkeys.get_active_ban_set(self.state.last_challenge_id)
+
     def set_weights_with_ban_check(self, context: str = "", winner_hotkey: str = None):
         """Set weights with ban_emissions check. Pass winner_hotkey for emission-split winner rewards."""
+        banned = self._active_banned_coldkeys()
         if self.state.ban_emissions:
             logger.warning(f"EMISSIONS BANNED by challenge server - burning emissions ({context})")
-            self.weight_manager.set_burn_weights()
+            self.weight_manager.set_burn_weights(banned_coldkeys=banned)
         elif winner_hotkey:
-            self.weight_manager.set_winner_weights(winner_hotkey, self.emission_manager.miner_emission_percentage)
+            self.weight_manager.set_winner_weights(
+                winner_hotkey,
+                self.emission_manager.miner_emission_percentage,
+                banned_coldkeys=banned,
+            )
         else:
-            self.weight_manager.set_burn_weights()
+            self.weight_manager.set_burn_weights(banned_coldkeys=banned)
     
     def __init__(self, config):
         self.config = config
@@ -71,6 +106,7 @@ class ChipForgeValidator:
         
         # Initialize components
         self.state = ValidatorState()
+        self.banned_coldkeys = BannedColdkeysManager()
         self.emission_manager = EmissionManager(
             miner_emission_percentage=getattr(config, 'miner_emission_percentage', 100.0)
         )
@@ -128,6 +164,9 @@ class ChipForgeValidator:
                         self._update_batch_window_config(challenge_info)
                 except Exception as e:
                     logger.error(f"Error fetching baseline score during crash recovery: {e}")
+
+                # Sync banned coldkeys for this challenge
+                await self.sync_banned_coldkeys(challenge_id)
 
                 # Check if it's the same challenge we were working on
                 if self.state.last_challenge_id == challenge_id:
@@ -528,7 +567,15 @@ class ChipForgeValidator:
                     logger.error(f"Error updating challenge info: {e}")
 
                 self._last_expiration_check[challenge_id] = current_time
-            
+
+            # Periodic banned coldkeys refresh (every 10 minutes, independent of expiration check)
+            if not hasattr(self, '_last_banned_sync'):
+                self._last_banned_sync = {}
+            last_banned_sync = self._last_banned_sync.get(challenge_id, datetime.min.replace(tzinfo=timezone.utc))
+            if (current_time - last_banned_sync).total_seconds() > 600:
+                await self.sync_banned_coldkeys(challenge_id)
+                self._last_banned_sync[challenge_id] = current_time
+
             # NEW CHALLENGE DETECTED - Reset both validator state AND emission manager
             if self.state.last_challenge_id != challenge_id:
                 await self.miner_comms.notify_miners_challenge_active(challenge_id, challenge['github_url'])
@@ -559,6 +606,12 @@ class ChipForgeValidator:
                         logger.warning(f"Failed to fetch challenge info for {challenge_id}")
                 except Exception as e:
                     logger.error(f"Error fetching challenge info: {e}")
+
+                # Sync banned coldkeys for the new challenge
+                await self.sync_banned_coldkeys(challenge_id)
+                if not hasattr(self, '_last_banned_sync'):
+                    self._last_banned_sync = {}
+                self._last_banned_sync[challenge_id] = datetime.now(timezone.utc)
 
                 # Store challenge expiration time
                 if 'expires_at' in challenge:
