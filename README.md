@@ -1,6 +1,6 @@
-# ChipForge (SN84)
+# ChipForge
 
-ChipForge (SN84) introduces the first digital design subnet for decentralized hardware innovation. This subnet enables miners to compete in designing real silicon. Processor development is organized into on-chain challenges — spanning AI accelerators, cryptographic modules, mini-GPUs, and other critical components. Participants download specifications, leverage AI tools, and submit complete Verilog/SystemVerilog implementations. The highest-quality designs earn rewards while contributing to fully manufacturable chips.
+ChipForge introduces the first digital design subnet for decentralized hardware innovation. This subnet enables miners to compete in designing real silicon. Processor development is organized into on-chain challenges — spanning AI accelerators, cryptographic modules, mini-GPUs, and other critical components. Participants download specifications, leverage AI tools, and submit complete Verilog/SystemVerilog implementations. The highest-quality designs earn rewards while contributing to fully manufacturable chips.
 
 In the short term, ChipForge focuses on advancing digital hardware design, with future applications across IoT, robotics, edge devices, and post-quantum security. Our roadmap includes progressing from design to full-scale fabrication within a year. Revenue from design IPs and fabricated chips will be reinvested into the ecosystem, ensuring sustainable value creation. Backed by the Tatsu validator team and open to strategic partnerships, ChipForge marks the beginning of a new era — decentralized, collaborative, and on-chain digital design.
 
@@ -348,7 +348,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- **Discord**: [ChipForge - SN84](https://discord.com/channels/799672011265015819/1408463235082092564)
+- **Discord**: [ChipForge](https://discord.com/channels/799672011265015819/1408463235082092564)
 
 ## Roadmap
 
